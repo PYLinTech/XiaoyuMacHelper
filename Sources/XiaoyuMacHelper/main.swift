@@ -76,6 +76,11 @@ struct SearchEnginePreset: Equatable {
     ]
 
     static let defaultTemplate = all[0].template
+    static let customTitle = "自定义"
+
+    static func presetIndex(for template: String) -> Int? {
+        all.firstIndex { $0.template == template }
+    }
 }
 
 struct AppSettings: Equatable, Sendable {
@@ -567,6 +572,143 @@ final class ToolbarButton: NSButton {
 }
 
 @MainActor
+final class ScreenshotToolbarButton: NSButton {
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovering = false
+    var onClick: (() -> Void)?
+
+    init(title: String) {
+        super.init(frame: .zero)
+
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.masksToBounds = true
+        setButtonType(.momentaryChange)
+        target = self
+        action = #selector(clicked)
+        setTitle(title)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        if let trackingAreaRef { removeTrackingArea(trackingAreaRef) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        updateHoverBackground()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        updateHoverBackground()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateHoverBackground()
+    }
+
+    func setTitle(_ title: String) {
+        let attributed = LiquidGlassOverlayStyle.attributedText(
+            title,
+            font: NSFont.systemFont(ofSize: 13, weight: .medium)
+        )
+        attributedTitle = attributed
+        attributedAlternateTitle = attributed
+    }
+
+    @objc private func clicked() {
+        onClick?()
+    }
+
+    private func updateHoverBackground() {
+        layer?.backgroundColor = isHovering ? LiquidGlassOverlayStyle.hoverBackgroundColor() : nil
+    }
+}
+
+@MainActor
+final class ScreenshotActionToolbarWindow: FloatingOverlayPanel {
+    private enum Metrics {
+        static let height: CGFloat = 38
+        static let horizontalPadding: CGFloat = 6
+        static let buttonWidth: CGFloat = 58
+        static let buttonHeight: CGFloat = 28
+        static let buttonGap: CGFloat = 6
+        static let cornerRadius: CGFloat = 10
+
+        static var width: CGFloat {
+            horizontalPadding * 2 + buttonWidth * 2 + buttonGap
+        }
+    }
+
+    private let fullScreenButton = ScreenshotToolbarButton(title: "全屏")
+    private let confirmButton = ScreenshotToolbarButton(title: "✓")
+    private let buttonContainer = NSView()
+    var onFullScreen: (() -> Void)?
+    var onConfirm: (() -> Void)?
+
+    init() {
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: Metrics.width, height: Metrics.height),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+
+        configureFloatingOverlay()
+        level = .screenSaver
+
+        let background = NSGlassEffectView(frame: contentView?.bounds ?? .zero)
+        background.autoresizingMask = [.width, .height]
+        LiquidGlassOverlayStyle.configureGlass(background, cornerRadius: Metrics.cornerRadius)
+        buttonContainer.frame = background.bounds
+        buttonContainer.autoresizingMask = [.width, .height]
+        background.contentView = buttonContainer
+        contentView = background
+
+        fullScreenButton.onClick = { [weak self] in self?.onFullScreen?() }
+        confirmButton.onClick = { [weak self] in self?.onConfirm?() }
+        buttonContainer.addSubview(fullScreenButton)
+        buttonContainer.addSubview(confirmButton)
+        layoutButtons()
+    }
+
+    func show(at frame: NSRect) {
+        setFrame(frame, display: true)
+        orderFrontRegardless()
+    }
+
+    private func layoutButtons() {
+        fullScreenButton.frame = NSRect(
+            x: Metrics.horizontalPadding,
+            y: (Metrics.height - Metrics.buttonHeight) / 2,
+            width: Metrics.buttonWidth,
+            height: Metrics.buttonHeight
+        )
+        confirmButton.frame = NSRect(
+            x: fullScreenButton.frame.maxX + Metrics.buttonGap,
+            y: fullScreenButton.frame.minY,
+            width: Metrics.buttonWidth,
+            height: Metrics.buttonHeight
+        )
+    }
+}
+
+@MainActor
 final class SelectionToolbarWindow: FloatingOverlayPanel {
     private enum Metrics {
         static let height: CGFloat = 38
@@ -848,6 +990,7 @@ final class ToastWindow: GlassTextWindow {
 @MainActor
 final class ScreenshotSelectionWindow: NSPanel {
     private let selectionView = ScreenshotSelectionView()
+    private let actionToolbarWindow = ScreenshotActionToolbarWindow()
 
     init() {
         super.init(
@@ -868,6 +1011,11 @@ final class ScreenshotSelectionWindow: NSPanel {
         contentView = selectionView
     }
 
+    override func orderOut(_ sender: Any?) {
+        actionToolbarWindow.orderOut(nil)
+        super.orderOut(sender)
+    }
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
@@ -880,12 +1028,21 @@ final class ScreenshotSelectionWindow: NSPanel {
         onCancel: @escaping () -> Void
     ) {
         setFrame(screenFrame, display: true)
+        attachActionToolbarIfNeeded()
+        actionToolbarWindow.onFullScreen = { [weak self] in
+            guard let self else { return }
+            self.dismissSelectionOverlay()
+            onConfirm(image)
+        }
+        actionToolbarWindow.onConfirm = { [weak self] in
+            self?.selectionView.confirm()
+        }
         selectionView.configure(
             image: image,
             initialSelection: initialSelection,
             onConfirm: { [weak self] selection in
                 guard let self else { return }
-                self.orderOut(nil)
+                self.dismissSelectionOverlay()
                 guard let croppedImage = Self.crop(image, selection: selection, screenSize: screenFrame.size) else {
                     onFailure()
                     return
@@ -893,12 +1050,37 @@ final class ScreenshotSelectionWindow: NSPanel {
                 onConfirm(croppedImage)
             },
             onCancel: { [weak self] in
-                self?.orderOut(nil)
+                self?.dismissSelectionOverlay()
                 onCancel()
+            },
+            onActionBarFrameChanged: { [weak self] frame in
+                self?.positionActionToolbar(frame, screenFrame: screenFrame)
             }
         )
         orderFrontRegardless()
+        positionActionToolbar(selectionView.actionBarFrame, screenFrame: screenFrame)
         makeKey()
+    }
+
+    private func attachActionToolbarIfNeeded() {
+        guard actionToolbarWindow.parent !== self else { return }
+        actionToolbarWindow.parent?.removeChildWindow(actionToolbarWindow)
+        addChildWindow(actionToolbarWindow, ordered: .above)
+    }
+
+    private func dismissSelectionOverlay() {
+        actionToolbarWindow.orderOut(nil)
+        orderOut(nil)
+    }
+
+    private func positionActionToolbar(_ frame: NSRect, screenFrame: NSRect) {
+        attachActionToolbarIfNeeded()
+        actionToolbarWindow.show(at: NSRect(
+            x: screenFrame.minX + frame.minX,
+            y: screenFrame.minY + frame.minY,
+            width: frame.width,
+            height: frame.height
+        ))
     }
 
     private static func crop(_ image: CGImage, selection: NSRect, screenSize: NSSize) -> CGImage? {
@@ -935,10 +1117,19 @@ final class ScreenshotSelectionView: NSView {
 
     private enum Metrics {
         static let minSelectionSize: CGFloat = 18
-        static let handleRadius: CGFloat = 7
-        static let handleHitRadius: CGFloat = 18
-        static let confirmSize = NSSize(width: 44, height: 36)
+        static let handleRadius: CGFloat = 10
+        static let handleHitRadius: CGFloat = 28
+        static let actionBarHeight: CGFloat = 38
+        static let actionBarPadding: CGFloat = 6
+        static let actionBarGap: CGFloat = 6
+        static let actionBarCornerRadius: CGFloat = 10
+        static let actionButtonHeight: CGFloat = 28
+        static let actionButtonWidth: CGFloat = 58
         static let confirmGap: CGFloat = 12
+
+        static var actionBarWidth: CGFloat {
+            actionBarPadding * 2 + actionButtonWidth * 2 + actionBarGap
+        }
     }
 
     private var previewImage: NSImage?
@@ -946,6 +1137,7 @@ final class ScreenshotSelectionView: NSView {
     private var draggedCorner: Corner?
     private var onConfirm: ((NSRect) -> Void)?
     private var onCancel: (() -> Void)?
+    private var onActionBarFrameChanged: ((NSRect) -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -953,7 +1145,8 @@ final class ScreenshotSelectionView: NSView {
         image: CGImage,
         initialSelection: NSRect,
         onConfirm: @escaping (NSRect) -> Void,
-        onCancel: @escaping () -> Void
+        onCancel: @escaping () -> Void,
+        onActionBarFrameChanged: @escaping (NSRect) -> Void
     ) {
         previewImage = NSImage(cgImage: image, size: bounds.size)
         selection = Self.normalized(initialSelection).intersection(bounds)
@@ -962,6 +1155,8 @@ final class ScreenshotSelectionView: NSView {
         }
         self.onConfirm = onConfirm
         self.onCancel = onCancel
+        self.onActionBarFrameChanged = onActionBarFrameChanged
+        onActionBarFrameChanged(actionBarFrame)
         needsDisplay = true
     }
 
@@ -981,24 +1176,24 @@ final class ScreenshotSelectionView: NSView {
 
         drawSelectionBorder()
         drawHandles()
-        drawConfirmButton()
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if confirmFrame.contains(point) {
-            confirm()
-            return
-        }
-
         draggedCorner = corner(at: point)
+
+        // 点击选区外时不要让独立的确认工具栏被截图窗口压到后面。
+        // 这里重新通知外层定位/置顶一次，保证工具栏仍停留在当前选区附近。
+        onActionBarFrameChanged?(actionBarFrame)
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let draggedCorner else { return }
+        let previousDirtyRect = redrawRectForCurrentSelection()
         let point = clamped(convert(event.locationInWindow, from: nil))
         updateSelection(corner: draggedCorner, point: point)
-        needsDisplay = true
+        onActionBarFrameChanged?(actionBarFrame)
+        setNeedsDisplay(previousDirtyRect.union(redrawRectForCurrentSelection()))
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1015,14 +1210,17 @@ final class ScreenshotSelectionView: NSView {
         }
     }
 
-    private var confirmFrame: NSRect {
-        let preferredX = selection.maxX - Metrics.confirmSize.width
-        let preferredY = selection.minY - Metrics.confirmGap - Metrics.confirmSize.height
-        let x = min(max(preferredX, bounds.minX + 8), bounds.maxX - Metrics.confirmSize.width - 8)
+    var actionBarFrame: NSRect {
+        let preferredX = selection.maxX - Metrics.actionBarWidth
+        let preferredY = selection.minY - Metrics.confirmGap - Metrics.actionBarHeight
+        let x = min(max(preferredX, bounds.minX + 8), bounds.maxX - Metrics.actionBarWidth - 8)
         let y = preferredY >= bounds.minY + 8
             ? preferredY
-            : min(selection.maxY + Metrics.confirmGap, bounds.maxY - Metrics.confirmSize.height - 8)
-        return NSRect(origin: NSPoint(x: x, y: y), size: Metrics.confirmSize)
+            : min(selection.maxY + Metrics.confirmGap, bounds.maxY - Metrics.actionBarHeight - 8)
+        return NSRect(
+            origin: NSPoint(x: x, y: y),
+            size: NSSize(width: Metrics.actionBarWidth, height: Metrics.actionBarHeight)
+        )
     }
 
     private func drawSelectionBorder() {
@@ -1043,25 +1241,6 @@ final class ScreenshotSelectionView: NSView {
             ring.lineWidth = 1
             ring.stroke()
         }
-    }
-
-    private func drawConfirmButton() {
-        let frame = confirmFrame
-        NSColor.systemBlue.setFill()
-        let path = NSBezierPath(roundedRect: frame, xRadius: 12, yRadius: 12)
-        path.fill()
-
-        NSColor.white.set()
-        let text = "✓" as NSString
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 22, weight: .bold),
-            .foregroundColor: NSColor.white
-        ]
-        let textSize = text.size(withAttributes: attributes)
-        text.draw(
-            at: NSPoint(x: frame.midX - textSize.width / 2, y: frame.midY - textSize.height / 2),
-            withAttributes: attributes
-        )
     }
 
     private var handlePoints: [NSPoint] {
@@ -1093,6 +1272,13 @@ final class ScreenshotSelectionView: NSView {
             width: Metrics.handleRadius * 2,
             height: Metrics.handleRadius * 2
         )
+    }
+
+    private func redrawRectForCurrentSelection() -> NSRect {
+        let handleBounds = handlePoints
+            .map { handleFrame(centeredAt: $0).insetBy(dx: -2, dy: -2) }
+            .reduce(selection.insetBy(dx: -3, dy: -3)) { $0.union($1) }
+        return handleBounds.union(actionBarFrame.insetBy(dx: -3, dy: -3)).intersection(bounds)
     }
 
     private func updateSelection(corner: Corner, point: NSPoint) {
@@ -1135,8 +1321,11 @@ final class ScreenshotSelectionView: NSView {
         )
     }
 
-    private func confirm() {
-        let selectedRect = selection
+    func confirm() {
+        confirm(selection: selection)
+    }
+
+    private func confirm(selection selectedRect: NSRect) {
         clearImage()
         onConfirm?(selectedRect)
     }
@@ -1148,6 +1337,7 @@ final class ScreenshotSelectionView: NSView {
 
     private func clearImage() {
         previewImage = nil
+        onActionBarFrameChanged = nil
     }
 }
 
@@ -1381,15 +1571,22 @@ final class SelectionToolbarController {
     }
 
     private func finishScreenshot(_ image: CGImage) {
-        do {
-            if currentSettings.screenshotCopiesToClipboard {
-                Self.copyScreenshotToPasteboard(image)
-            }
+        if currentSettings.screenshotCopiesToClipboard {
+            Self.copyScreenshotToPasteboard(image)
+        }
 
-            let url = try Self.saveScreenshot(image, toDirectoryAt: currentSettings.screenshotSaveDirectory)
-            showToast("已保存截图：\(url.lastPathComponent)")
-        } catch {
-            showToast("截图失败")
+        let saveDirectory = currentSettings.screenshotSaveDirectory
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try Self.saveScreenshot(image, toDirectoryAt: saveDirectory) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                switch result {
+                case .success(let url):
+                    self.showToast("已保存截图：\(url.lastPathComponent)")
+                case .failure:
+                    self.showToast("截图失败")
+                }
+            }
         }
     }
 
@@ -1427,7 +1624,7 @@ final class SelectionToolbarController {
         pasteboard.writeObjects([nsImage])
     }
 
-    private static func saveScreenshot(_ image: CGImage, toDirectoryAt path: String) throws -> URL {
+    nonisolated private static func saveScreenshot(_ image: CGImage, toDirectoryAt path: String) throws -> URL {
         let directoryURL = path.isEmpty ? defaultScreenshotDirectoryURL() : URL(fileURLWithPath: path, isDirectory: true)
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
@@ -1442,7 +1639,7 @@ final class SelectionToolbarController {
         return fileURL
     }
 
-    private static func uniqueScreenshotURL(in directory: URL, timestamp: String) -> URL {
+    nonisolated private static func uniqueScreenshotURL(in directory: URL, timestamp: String) -> URL {
         let baseName = "截图\(timestamp)"
         var candidate = directory.appendingPathComponent("\(baseName).png")
         var index = 2
@@ -1482,7 +1679,7 @@ final class SelectionToolbarController {
             return
         }
 
-        guard let encodedText = Self.percentEncodedSearchText(text),
+        guard let encodedText = Self.encodedSearchQuery(text),
               let url = URL(string: template.replacingOccurrences(of: "%s", with: encodedText)) else {
             showToast("搜索链接无效")
             return
@@ -1528,10 +1725,11 @@ final class SelectionToolbarController {
         return text?.isEmpty == false ? text : nil
     }
 
-    private static func percentEncodedSearchText(_ text: String) -> String? {
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: ":#[]@!$&'()*+,;=")
-        return text.addingPercentEncoding(withAllowedCharacters: allowed)
+    private static func encodedSearchQuery(_ text: String) -> String? {
+        let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return text
+            .addingPercentEncoding(withAllowedCharacters: unreserved)?
+            .replacingOccurrences(of: "%20", with: "+")
     }
 
     private static func postCommandShortcut(_ keyCode: CGKeyCode) {
@@ -1751,10 +1949,12 @@ final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
     }
 
     private func centeredTextRect(forBounds rect: NSRect) -> NSRect {
-        var textRect = super.drawingRect(forBounds: rect)
-        let textHeight = cellSize(forBounds: rect).height
-        textRect.origin.y = rect.origin.y + floor((rect.height - textHeight) / 2)
-        textRect.size.height = min(textHeight, rect.height)
+        let baseRect = super.drawingRect(forBounds: rect)
+        let font = font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        var textRect = baseRect
+        textRect.origin.y = rect.midY - lineHeight / 2
+        textRect.size.height = min(lineHeight, rect.height)
         return textRect
     }
 }
@@ -1782,6 +1982,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
     private var page: Page = .modules
     private var selectionToolbarOrder = ToolbarAction.configurableCases
     private var isAccessibilityEnabledForDisplay = false
+    private var isSearchTemplateCustom = false
 
     private let glassContainer = NSGlassEffectContainerView()
     private let glassContentView = NSView()
@@ -1854,9 +2055,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         pasteRow.setEnabled(settings.isSelectionToolbarPasteEnabled)
         searchRow.setEnabled(settings.isSelectionToolbarSearchEnabled)
         screenshotRow.setEnabled(settings.isSelectionToolbarScreenshotEnabled)
-        if searchTemplateField.stringValue != settings.searchURLTemplate {
-            searchTemplateField.stringValue = settings.searchURLTemplate
-        }
+        renderSearchSettings(settings)
         renderScreenshotSettings(settings)
         layoutForCurrentPage()
     }
@@ -1931,7 +2130,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         searchRow.onSettings = { [weak self] _ in self?.showSearchSettingsPage() }
         screenshotRow.onSettings = { [weak self] _ in self?.showScreenshotSettingsPage() }
 
-        searchEnginePopup.addItems(withTitles: SearchEnginePreset.all.map(\.title))
+        searchEnginePopup.addItems(withTitles: SearchEnginePreset.all.map(\.title) + [SearchEnginePreset.customTitle])
         searchEnginePopup.bezelStyle = .glass
         searchEnginePopup.target = self
         searchEnginePopup.action = #selector(searchEngineSelected)
@@ -1939,7 +2138,15 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
         searchTemplateField.cell = VerticallyCenteredTextFieldCell(textCell: "")
         searchTemplateField.font = NSFont.systemFont(ofSize: 13, weight: .regular)
-        searchTemplateField.placeholderString = "搜索链接，使用 %s 作为搜索词"
+        searchTemplateField.placeholderString = "请以 %s 代表搜索词"
+        searchTemplateField.cell?.usesSingleLineMode = true
+        searchTemplateField.cell?.lineBreakMode = .byTruncatingTail
+        searchTemplateField.isEditable = true
+        searchTemplateField.isSelectable = true
+        searchTemplateField.isBezeled = true
+        searchTemplateField.bezelStyle = .roundedBezel
+        searchTemplateField.drawsBackground = true
+        searchTemplateField.backgroundColor = .controlBackgroundColor
         searchTemplateField.delegate = self
         searchTemplateField.target = self
         searchTemplateField.action = #selector(searchTemplateCommitted)
@@ -2052,8 +2259,16 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
     @objc private func searchEngineSelected() {
         let index = searchEnginePopup.indexOfSelectedItem
+        guard index != SearchEnginePreset.all.count else {
+            isSearchTemplateCustom = true
+            updateSearchTemplateFieldLock(isCustom: true)
+            return
+        }
+
         guard SearchEnginePreset.all.indices.contains(index) else { return }
+        isSearchTemplateCustom = false
         searchTemplateField.stringValue = SearchEnginePreset.all[index].template
+        updateSearchTemplateFieldLock(isCustom: false)
         commitSearchTemplate()
     }
 
@@ -2061,7 +2276,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         commitSearchTemplate()
     }
 
-    func controlTextDidChange(_ notification: Notification) {
+    func controlTextDidEndEditing(_ notification: Notification) {
         guard notification.object as? NSTextField === searchTemplateField else { return }
         commitSearchTemplate()
     }
@@ -2240,9 +2455,9 @@ final class ControlView: NSView, NSTextFieldDelegate {
         )
         searchTemplateField.frame = NSRect(
             x: contentX,
-            y: searchEnginePopup.frame.minY - 48,
+            y: searchEnginePopup.frame.minY - 52,
             width: contentWidth,
-            height: 32
+            height: 34
         )
     }
 
@@ -2315,6 +2530,28 @@ final class ControlView: NSView, NSTextFieldDelegate {
     private static func displayName(forDirectoryAt path: String) -> String {
         let directoryURL = path.isEmpty ? defaultScreenshotDirectoryURL() : URL(fileURLWithPath: path, isDirectory: true)
         return directoryURL.path
+    }
+
+    private func renderSearchSettings(_ settings: AppSettings) {
+        let presetIndex = SearchEnginePreset.presetIndex(for: settings.searchURLTemplate)
+        let shouldUseCustom = isSearchTemplateCustom || presetIndex == nil
+
+        if searchTemplateField.currentEditor() == nil && searchTemplateField.stringValue != settings.searchURLTemplate {
+            searchTemplateField.stringValue = settings.searchURLTemplate
+        }
+
+        isSearchTemplateCustom = shouldUseCustom
+        searchEnginePopup.selectItem(at: shouldUseCustom ? SearchEnginePreset.all.count : (presetIndex ?? 0))
+        updateSearchTemplateFieldLock(isCustom: isSearchTemplateCustom)
+    }
+
+    private func updateSearchTemplateFieldLock(isCustom: Bool) {
+        searchTemplateField.isEditable = isCustom
+        searchTemplateField.isSelectable = isCustom
+        searchTemplateField.textColor = isCustom ? .labelColor : .secondaryLabelColor
+        searchTemplateField.backgroundColor = isCustom
+            ? .controlBackgroundColor
+            : .unemphasizedSelectedContentBackgroundColor
     }
 
     private func renderScreenshotSettings(_ settings: AppSettings) {
