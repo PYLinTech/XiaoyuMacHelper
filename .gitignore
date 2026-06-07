@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# SwiftPM / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Build and release output
+dist/
+release/
+.release-staging/
