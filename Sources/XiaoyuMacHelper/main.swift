@@ -359,9 +359,43 @@ private func removeEventMonitor(_ monitor: inout Any?) {
     monitor = nil
 }
 
-private extension NSAppearance {
-    var isDarkAqua: Bool {
-        bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+@MainActor
+enum LiquidGlassOverlayStyle {
+    private static let overlayTextShadow: NSShadow = {
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.74)
+        shadow.shadowBlurRadius = 2.8
+        shadow.shadowOffset = NSSize(width: 0, height: -1.0)
+        return shadow
+    }()
+
+    static func configureGlass(_ view: NSGlassEffectView, cornerRadius: CGFloat) {
+        view.style = .clear
+        view.tintColor = nil
+        view.cornerRadius = cornerRadius
+    }
+
+    static func primaryTextColor() -> NSColor {
+        NSColor.white.withAlphaComponent(0.96)
+    }
+
+    static func hoverBackgroundColor() -> CGColor {
+        NSColor.controlAccentColor.cgColor
+    }
+
+    static func textShadow() -> NSShadow {
+        overlayTextShadow
+    }
+
+    static func attributedText(_ text: String, font: NSFont) -> NSAttributedString {
+        NSAttributedString(
+            string: text,
+            attributes: [
+                .foregroundColor: primaryTextColor(),
+                .font: font,
+                .shadow: textShadow()
+            ]
+        )
     }
 }
 
@@ -397,16 +431,8 @@ class FloatingOverlayPanel: NSPanel {
 final class ToolbarButton: NSButton {
     private enum Style {
         @MainActor
-        static func textColor(for view: NSView) -> NSColor {
-            view.effectiveAppearance.isDarkAqua
-                ? NSColor.white.withAlphaComponent(0.92)
-                : NSColor.black.withAlphaComponent(0.86)
-        }
-
-        @MainActor
-        static func hoverBackground(for view: NSView) -> CGColor {
-            let base: NSColor = view.effectiveAppearance.isDarkAqua ? .white : .black
-            return base.withAlphaComponent(0.12).cgColor
+        static func hoverBackground() -> CGColor {
+            LiquidGlassOverlayStyle.hoverBackgroundColor()
         }
     }
 
@@ -459,31 +485,32 @@ final class ToolbarButton: NSButton {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        refreshAppearanceColors()
+        updateHoverBackground()
     }
 
     @objc private func clicked() {
         onAction?(actionType)
     }
 
-    private func refreshAppearanceColors() {
-        let title = Self.title(actionType.title, color: Style.textColor(for: self))
+    func refreshAppearanceColors() {
+        let title = Self.title(actionType.title)
         attributedTitle = title
         attributedAlternateTitle = title
         updateHoverBackground()
     }
 
     private func updateHoverBackground() {
-        layer?.backgroundColor = isHovering ? Style.hoverBackground(for: self) : nil
+        guard let layer else { return }
+
+        layer.backgroundColor = isHovering ? Style.hoverBackground() : nil
+        layer.borderColor = nil
+        layer.borderWidth = 0
     }
 
-    private static func title(_ text: String, color: NSColor) -> NSAttributedString {
-        NSAttributedString(
-            string: text,
-            attributes: [
-                .foregroundColor: color,
-                .font: NSFont.systemFont(ofSize: 13, weight: .medium)
-            ]
+    private static func title(_ text: String) -> NSAttributedString {
+        LiquidGlassOverlayStyle.attributedText(
+            text,
+            font: NSFont.systemFont(ofSize: 13, weight: .medium)
         )
     }
 }
@@ -506,6 +533,7 @@ final class SelectionToolbarWindow: FloatingOverlayPanel {
     }
 
     private var buttons: [ToolbarButton] = []
+    private let buttonContainer = NSView()
     var onAction: ((ToolbarAction) -> Void)?
 
     init() {
@@ -520,8 +548,10 @@ final class SelectionToolbarWindow: FloatingOverlayPanel {
 
         let background = NSGlassEffectView(frame: contentView?.bounds ?? .zero)
         background.autoresizingMask = [.width, .height]
-        background.style = .regular
-        background.cornerRadius = Metrics.cornerRadius
+        LiquidGlassOverlayStyle.configureGlass(background, cornerRadius: Metrics.cornerRadius)
+        buttonContainer.frame = background.bounds
+        buttonContainer.autoresizingMask = [.width, .height]
+        background.contentView = buttonContainer
         contentView = background
     }
 
@@ -547,7 +577,7 @@ final class SelectionToolbarWindow: FloatingOverlayPanel {
             button.onAction = { [weak self] action in
                 self?.onAction?(action)
             }
-            contentView?.addSubview(button)
+            buttonContainer.addSubview(button)
             return button
         }
     }
@@ -580,21 +610,96 @@ final class SelectionToolbarWindow: FloatingOverlayPanel {
 }
 
 @MainActor
-final class ToastWindow: FloatingOverlayPanel {
-    private enum Metrics {
-        static let height: CGFloat = 36
-        static let horizontalPadding: CGFloat = 22
-        static let bottomInset: CGFloat = 82
-        static let minWidth: CGFloat = 150
-        static let maxWidth: CGFloat = 360
+final class CenteredGlassTextView: NSView {
+    var text: String = "" {
+        didSet { invalidateTextLayout() }
     }
 
-    private let label = NSTextField(labelWithString: "")
-    private var dismissWorkItem: DispatchWorkItem?
+    var font: NSFont = NSFont.systemFont(ofSize: 13, weight: .medium) {
+        didSet { invalidateTextLayout() }
+    }
 
-    init() {
+    private var cachedText: NSAttributedString?
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let attributedText = styledText()
+        let textSize = measuredSize()
+        let drawRect = NSRect(
+            x: 0,
+            y: floor((bounds.height - textSize.height) / 2),
+            width: bounds.width,
+            height: ceil(textSize.height)
+        )
+        attributedText.draw(
+            with: drawRect,
+            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+            context: nil
+        )
+    }
+
+    func measuredWidth(for text: String) -> CGFloat {
+        ceil(styledText(for: text).boundingRect(
+            with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        ).width)
+    }
+
+    private func measuredSize() -> NSSize {
+        styledText().boundingRect(
+            with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        ).size
+    }
+
+    private func styledText() -> NSAttributedString {
+        if let cachedText {
+            return cachedText
+        }
+
+        let attributedText = styledText(for: text)
+        cachedText = attributedText
+        return attributedText
+    }
+
+    private func styledText(for text: String) -> NSAttributedString {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        paragraphStyle.lineBreakMode = .byTruncatingTail
+
+        let attributedText = NSMutableAttributedString(attributedString: LiquidGlassOverlayStyle.attributedText(text, font: font))
+        attributedText.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: attributedText.length))
+        return attributedText
+    }
+
+    private func invalidateTextLayout() {
+        cachedText = nil
+        needsDisplay = true
+    }
+}
+
+@MainActor
+class GlassTextWindow: FloatingOverlayPanel {
+    struct Configuration {
+        let height: CGFloat
+        let horizontalPadding: CGFloat
+        let minWidth: CGFloat
+        let maxWidth: CGFloat?
+        let font: NSFont
+        let cornerRadius: CGFloat
+    }
+
+    private let configuration: Configuration
+    private let textView = CenteredGlassTextView()
+    let content = ClickableView()
+
+    init(configuration: Configuration, initialMessage: String = "") {
+        self.configuration = configuration
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: Metrics.minWidth, height: Metrics.height),
+            contentRect: NSRect(x: 0, y: 0, width: configuration.minWidth, height: configuration.height),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -604,30 +709,63 @@ final class ToastWindow: FloatingOverlayPanel {
 
         let background = NSGlassEffectView(frame: contentView?.bounds ?? .zero)
         background.autoresizingMask = [.width, .height]
-        background.style = .regular
-        background.cornerRadius = Metrics.height / 2
+        LiquidGlassOverlayStyle.configureGlass(background, cornerRadius: configuration.cornerRadius)
+        content.frame = background.bounds
+        content.autoresizingMask = [.width, .height]
+        background.contentView = content
 
-        label.alignment = .center
-        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .labelColor
-        label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        background.addSubview(label)
-
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: Metrics.horizontalPadding),
-            label.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -Metrics.horizontalPadding),
-            label.centerYAnchor.constraint(equalTo: background.centerYAnchor)
-        ])
+        textView.frame = content.bounds.insetBy(dx: configuration.horizontalPadding, dy: 0)
+        textView.autoresizingMask = [.width, .height]
+        textView.font = configuration.font
+        textView.text = initialMessage
+        content.addSubview(textView)
 
         contentView = background
     }
 
+    func setMessage(_ message: String) {
+        textView.text = message
+    }
+
+    func fittingSize(for message: String) -> NSSize {
+        let textWidth = textView.measuredWidth(for: message)
+        let rawWidth = max(ceil(textWidth + configuration.horizontalPadding * 2), configuration.minWidth)
+        let width = configuration.maxWidth.map { min(rawWidth, $0) } ?? rawWidth
+        return NSSize(width: width, height: configuration.height)
+    }
+
+    func bottomCenterOrigin(size: NSSize, bottomInset: CGFloat) -> NSPoint {
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        return NSPoint(x: visible.midX - size.width / 2, y: visible.minY + bottomInset)
+    }
+}
+
+@MainActor
+final class ToastWindow: GlassTextWindow {
+    private enum Metrics {
+        static let bottomInset: CGFloat = 82
+    }
+
+    private var dismissWorkItem: DispatchWorkItem?
+
+    init() {
+        super.init(
+            configuration: Configuration(
+                height: 36,
+                horizontalPadding: 22,
+                minWidth: 150,
+                maxWidth: 360,
+                font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                cornerRadius: 18
+            )
+        )
+    }
+
     func show(message: String, duration: TimeInterval = 1.6) {
         dismissWorkItem?.cancel()
-        label.stringValue = message
         let size = fittingSize(for: message)
-        setFrame(NSRect(origin: bottomCenterOrigin(size: size), size: size), display: true)
+        setFrame(NSRect(origin: bottomCenterOrigin(size: size, bottomInset: Metrics.bottomInset), size: size), display: true)
+        setMessage(message)
         orderFrontRegardless()
 
         let workItem = DispatchWorkItem { [weak self] in
@@ -635,17 +773,6 @@ final class ToastWindow: FloatingOverlayPanel {
         }
         dismissWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: workItem)
-    }
-
-    private func fittingSize(for message: String) -> NSSize {
-        let textWidth = (message as NSString).size(withAttributes: [.font: label.font ?? NSFont.systemFont(ofSize: 13)]).width
-        let width = min(max(ceil(textWidth + Metrics.horizontalPadding * 2), Metrics.minWidth), Metrics.maxWidth)
-        return NSSize(width: width, height: Metrics.height)
-    }
-
-    private func bottomCenterOrigin(size: NSSize) -> NSPoint {
-        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        return NSPoint(x: visible.midX - size.width / 2, y: visible.minY + Metrics.bottomInset)
     }
 }
 
@@ -672,7 +799,6 @@ final class SelectionToolbarController {
     private var currentSettings: AppSettings
     private var mouseDownLocation: NSPoint?
     private var selectionTargetPID: pid_t?
-    private var didDrag = false
     private var pendingShow: DispatchWorkItem?
 
     private var isEnabled: Bool {
@@ -706,7 +832,7 @@ final class SelectionToolbarController {
     private func syncEventMonitor() {
         if isEnabled, eventMonitor == nil {
             eventMonitor = NSEvent.addGlobalMonitorForEvents(
-                matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown]
+                matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown]
             ) { [weak self] event in
                 DispatchQueue.main.async { self?.handle(event) }
             }
@@ -724,8 +850,6 @@ final class SelectionToolbarController {
         switch event.type {
         case .leftMouseDown:
             startSelectionTracking()
-        case .leftMouseDragged:
-            markDraggedIfNeeded()
         case .leftMouseUp:
             finishSelectionTracking()
         case .rightMouseDown:
@@ -741,25 +865,25 @@ final class SelectionToolbarController {
         selectionTargetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
 
-    private func markDraggedIfNeeded() {
-        guard let start = mouseDownLocation, !didDrag else { return }
-
-        let location = NSEvent.mouseLocation
-        let dx = location.x - start.x
-        let dy = location.y - start.y
-        didDrag = dx * dx + dy * dy >= Metrics.dragThresholdSquared
-    }
-
     private func finishSelectionTracking() {
         let point = NSEvent.mouseLocation
-        guard didDrag else {
+        guard isDragSelection(endingAt: point) else {
             reset(shouldHideToolbar: true, clearTarget: true)
             return
         }
 
         mouseDownLocation = nil
-        didDrag = false
         showToolbarSoon(near: point)
+    }
+
+    private func isDragSelection(endingAt point: NSPoint) -> Bool {
+        guard let start = mouseDownLocation else {
+            return false
+        }
+
+        let dx = point.x - start.x
+        let dy = point.y - start.y
+        return dx * dx + dy * dy >= Metrics.dragThresholdSquared
     }
 
     private func showToolbarSoon(near point: NSPoint) {
@@ -848,7 +972,6 @@ final class SelectionToolbarController {
         pendingShow?.cancel()
         pendingShow = nil
         mouseDownLocation = nil
-        didDrag = false
         if clearTarget {
             selectionTargetPID = nil
         }
@@ -1043,6 +1166,58 @@ final class IconButtonView: NSButton {
     }
 }
 
+final class VerticallyCenteredTextFieldCell: NSTextFieldCell {
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        centeredTextRect(forBounds: rect)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        centeredTextRect(forBounds: rect)
+    }
+
+    override func edit(
+        withFrame rect: NSRect,
+        in controlView: NSView,
+        editor textObj: NSText,
+        delegate: Any?,
+        event: NSEvent?
+    ) {
+        super.edit(
+            withFrame: centeredTextRect(forBounds: rect),
+            in: controlView,
+            editor: textObj,
+            delegate: delegate,
+            event: event
+        )
+    }
+
+    override func select(
+        withFrame rect: NSRect,
+        in controlView: NSView,
+        editor textObj: NSText,
+        delegate: Any?,
+        start selStart: Int,
+        length selLength: Int
+    ) {
+        super.select(
+            withFrame: centeredTextRect(forBounds: rect),
+            in: controlView,
+            editor: textObj,
+            delegate: delegate,
+            start: selStart,
+            length: selLength
+        )
+    }
+
+    private func centeredTextRect(forBounds rect: NSRect) -> NSRect {
+        var textRect = super.drawingRect(forBounds: rect)
+        let textHeight = cellSize(forBounds: rect).height
+        textRect.origin.y = rect.origin.y + floor((rect.height - textHeight) / 2)
+        textRect.size.height = min(textHeight, rect.height)
+        return textRect
+    }
+}
+
 @MainActor
 final class ControlView: NSView, NSTextFieldDelegate {
     private enum Page {
@@ -1209,6 +1384,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         searchEnginePopup.action = #selector(searchEngineSelected)
         addSubview(searchEnginePopup)
 
+        searchTemplateField.cell = VerticallyCenteredTextFieldCell(textCell: "")
         searchTemplateField.font = NSFont.systemFont(ofSize: 13, weight: .regular)
         searchTemplateField.placeholderString = "搜索链接，使用 %s 作为搜索词"
         searchTemplateField.delegate = self
@@ -1635,76 +1811,47 @@ final class ActionSettingRow: NSView {
 }
 
 @MainActor
-final class CapsLockWindow: FloatingOverlayPanel {
-    private let label = NSTextField(labelWithString: "大写")
+final class CapsLockWindow: GlassTextWindow {
+    private enum Metrics {
+        static let bottomInset: CGFloat = 36
+    }
+
     var onClick: (() -> Void)?
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 92, height: 38),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+            configuration: Configuration(
+                height: 36,
+                horizontalPadding: 22,
+                minWidth: 92,
+                maxWidth: nil,
+                font: NSFont.systemFont(ofSize: 15, weight: .semibold),
+                cornerRadius: 18
+            ),
+            initialMessage: "大写"
         )
 
-        configureFloatingOverlay()
-
-        let content = ClickableView(frame: contentView?.bounds ?? .zero)
-        content.autoresizingMask = [.width, .height]
         content.onClick = { [weak self] in
             self?.onClick?()
         }
-
-        let background = NSGlassEffectView(frame: contentView?.bounds ?? .zero)
-        background.autoresizingMask = [.width, .height]
-        background.style = .regular
-        background.cornerRadius = 9
-        background.contentView = content
-
-        label.alignment = .center
-        label.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
-        label.textColor = .labelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(label)
-
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            label.centerYAnchor.constraint(equalTo: content.centerYAnchor)
-        ])
-
-        contentView = background
     }
 
     func showAtBottomCenter() {
-        let size = fittingSize()
+        let size = fittingSize(for: "大写")
         setFrame(NSRect(origin: .zero, size: size), display: false)
-        setFrameOrigin(bottomCenterOrigin(windowSize: size))
+        setFrameOrigin(bottomCenterOrigin(size: size, bottomInset: Metrics.bottomInset))
         orderFrontRegardless()
-    }
-
-    private func fittingSize() -> NSSize {
-        let textWidth = (label.stringValue as NSString).size(
-            withAttributes: [.font: label.font ?? NSFont.systemFont(ofSize: 15)]
-        ).width
-
-        return NSSize(width: max(72, ceil(textWidth + 34)), height: 38)
-    }
-
-    private func bottomCenterOrigin(windowSize: NSSize) -> NSPoint {
-        let screen = NSScreen.main
-        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let bottomInset: CGFloat = 36
-
-        return NSPoint(
-            x: visibleFrame.midX - windowSize.width / 2,
-            y: visibleFrame.minY + bottomInset
-        )
     }
 }
 
 @MainActor
 final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
+    private enum Metrics {
+        static let capsLockPollInterval: TimeInterval = 0.5
+        static let focusedStatusPollInterval: TimeInterval = 0.2
+        static let unfocusedStatusPollInterval: TimeInterval = 1.0
+    }
+
     private let launchMode: LaunchMode
     private let instanceLock: SingleInstanceLock
     private let settingsStore = SettingsStore()
@@ -1732,6 +1879,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         bindCallbacks()
         setupObservers()
         selectionToolbarController.start()
+        updateCapsLockPolling()
         updateCapsLockWindow(force: true)
         if launchMode.showsControlWindowOnLaunch {
             showControlWindow()
@@ -1849,14 +1997,21 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         }
 
         globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] _ in
-            DispatchQueue.main.async { self?.updateCapsLockWindow(force: false) }
+            DispatchQueue.main.async {
+                guard let self, self.currentSettings.isCapsLockIndicatorEnabled else {
+                    return
+                }
+
+                self.updateCapsLockWindow(force: false)
+            }
         }
         localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            self?.updateCapsLockWindow(force: false)
+            guard let self, self.currentSettings.isCapsLockIndicatorEnabled else {
+                return event
+            }
+
+            self.updateCapsLockWindow(force: false)
             return event
-        }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            DispatchQueue.main.async { self?.updateCapsLockWindow(force: false) }
         }
     }
 
@@ -1891,7 +2046,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let interval: TimeInterval = isFocused ? 0.2 : 1.0
+        let interval = isFocused ? Metrics.focusedStatusPollInterval : Metrics.unfocusedStatusPollInterval
         guard statusPollInterval != interval else {
             return
         }
@@ -1922,8 +2077,10 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         renderControlWindow(force: true)
 
         if isEnabled {
+            updateCapsLockPolling()
             updateCapsLockWindow(force: true)
         } else {
+            updateCapsLockPolling()
             previousCapsLockState = nil
             capsLockWindow.orderOut(nil)
         }
@@ -1982,6 +2139,22 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         }
 
         turnOffCapsLock()
+    }
+
+    private func updateCapsLockPolling() {
+        guard currentSettings.isCapsLockIndicatorEnabled else {
+            pollTimer?.invalidate()
+            pollTimer = nil
+            return
+        }
+
+        guard pollTimer == nil else {
+            return
+        }
+
+        pollTimer = Timer.scheduledTimer(withTimeInterval: Metrics.capsLockPollInterval, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async { self?.updateCapsLockWindow(force: false) }
+        }
     }
 
     private func updateCapsLockWindow(force: Bool) {
