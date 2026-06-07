@@ -4,6 +4,7 @@ import Carbon
 import Darwin
 import IOKit
 import IOKit.hidsystem
+import ScreenCaptureKit
 import ServiceManagement
 
 private let appIdentifier = "local.xiaoyu-mac-helper"
@@ -15,20 +16,33 @@ private let selectionToolbarEnabledKey = "SelectionToolbarEnabled"
 private let selectionToolbarCopyEnabledKey = "SelectionToolbarCopyEnabled"
 private let selectionToolbarPasteEnabledKey = "SelectionToolbarPasteEnabled"
 private let selectionToolbarSearchEnabledKey = "SelectionToolbarSearchEnabled"
+private let selectionToolbarScreenshotEnabledKey = "SelectionToolbarScreenshotEnabled"
 private let selectionToolbarOrderKey = "SelectionToolbarOrder"
 private let searchURLTemplateKey = "SearchURLTemplate"
+private let screenshotSaveDirectoryKey = "ScreenshotSaveDirectory"
+private let screenshotCopiesToClipboardKey = "ScreenshotCopiesToClipboard"
+private let screenshotSelectsRegionKey = "ScreenshotSelectsRegion"
 private let selectionToolbarDefaultOffMigrationKey = "SelectionToolbarDefaultOffMigrationDone"
 
-enum ToolbarAction: String, CaseIterable, Sendable {
+private func defaultScreenshotDirectoryURL() -> URL {
+    FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Desktop")
+}
+
+enum ToolbarAction: String, Sendable {
     case copy
     case paste
     case search
+    case screenshot
+
+    static let configurableCases: [ToolbarAction] = [.copy, .paste, .search, .screenshot]
 
     var title: String {
         switch self {
         case .copy: return "复制"
         case .paste: return "粘贴"
         case .search: return "搜索"
+        case .screenshot: return "截图"
         }
     }
 
@@ -36,15 +50,16 @@ enum ToolbarAction: String, CaseIterable, Sendable {
         switch self {
         case .copy: return CGKeyCode(kVK_ANSI_C)
         case .paste: return CGKeyCode(kVK_ANSI_V)
-        case .search: return nil
+        case .search, .screenshot: return nil
         }
     }
 
-    var defaultsKey: String {
+    var defaultsKey: String? {
         switch self {
         case .copy: return selectionToolbarCopyEnabledKey
         case .paste: return selectionToolbarPasteEnabledKey
         case .search: return selectionToolbarSearchEnabledKey
+        case .screenshot: return selectionToolbarScreenshotEnabledKey
         }
     }
 }
@@ -70,8 +85,12 @@ struct AppSettings: Equatable, Sendable {
     var isSelectionToolbarCopyEnabled: Bool
     var isSelectionToolbarPasteEnabled: Bool
     var isSelectionToolbarSearchEnabled: Bool
+    var isSelectionToolbarScreenshotEnabled: Bool
     var selectionToolbarOrder: [ToolbarAction]
     var searchURLTemplate: String
+    var screenshotSaveDirectory: String
+    var screenshotCopiesToClipboard: Bool
+    var screenshotSelectsRegion: Bool
 
     var visibleSelectionToolbarActions: [ToolbarAction] {
         selectionToolbarOrder.filter(isSelectionToolbarActionEnabled)
@@ -82,6 +101,7 @@ struct AppSettings: Equatable, Sendable {
         case .copy: return isSelectionToolbarCopyEnabled
         case .paste: return isSelectionToolbarPasteEnabled
         case .search: return isSelectionToolbarSearchEnabled
+        case .screenshot: return isSelectionToolbarScreenshotEnabled
         }
     }
 
@@ -90,6 +110,7 @@ struct AppSettings: Equatable, Sendable {
         case .copy: isSelectionToolbarCopyEnabled = isEnabled
         case .paste: isSelectionToolbarPasteEnabled = isEnabled
         case .search: isSelectionToolbarSearchEnabled = isEnabled
+        case .screenshot: isSelectionToolbarScreenshotEnabled = isEnabled
         }
     }
 }
@@ -125,8 +146,12 @@ final class SettingsStore {
             selectionToolbarCopyEnabledKey: true,
             selectionToolbarPasteEnabledKey: true,
             selectionToolbarSearchEnabledKey: true,
-            selectionToolbarOrderKey: ToolbarAction.allCases.map(\.rawValue),
-            searchURLTemplateKey: SearchEnginePreset.defaultTemplate
+            selectionToolbarScreenshotEnabledKey: true,
+            selectionToolbarOrderKey: ToolbarAction.configurableCases.map(\.rawValue),
+            searchURLTemplateKey: SearchEnginePreset.defaultTemplate,
+            screenshotSaveDirectoryKey: defaultScreenshotDirectoryURL().path,
+            screenshotCopiesToClipboardKey: true,
+            screenshotSelectsRegionKey: false
         ])
 
         if !defaults.bool(forKey: selectionToolbarDefaultOffMigrationKey) {
@@ -146,8 +171,12 @@ final class SettingsStore {
             isSelectionToolbarCopyEnabled: defaults.bool(forKey: selectionToolbarCopyEnabledKey),
             isSelectionToolbarPasteEnabled: defaults.bool(forKey: selectionToolbarPasteEnabledKey),
             isSelectionToolbarSearchEnabled: defaults.bool(forKey: selectionToolbarSearchEnabledKey),
+            isSelectionToolbarScreenshotEnabled: defaults.bool(forKey: selectionToolbarScreenshotEnabledKey),
             selectionToolbarOrder: order,
-            searchURLTemplate: defaults.string(forKey: searchURLTemplateKey) ?? SearchEnginePreset.defaultTemplate
+            searchURLTemplate: defaults.string(forKey: searchURLTemplateKey) ?? SearchEnginePreset.defaultTemplate,
+            screenshotSaveDirectory: defaults.string(forKey: screenshotSaveDirectoryKey) ?? defaultScreenshotDirectoryURL().path,
+            screenshotCopiesToClipboard: defaults.bool(forKey: screenshotCopiesToClipboardKey),
+            screenshotSelectsRegion: defaults.bool(forKey: screenshotSelectsRegionKey)
         )
     }
 
@@ -164,11 +193,27 @@ final class SettingsStore {
     }
 
     func setSelectionToolbarAction(_ action: ToolbarAction, enabled isEnabled: Bool) {
-        defaults.set(isEnabled, forKey: action.defaultsKey)
+        guard let defaultsKey = action.defaultsKey else {
+            return
+        }
+
+        defaults.set(isEnabled, forKey: defaultsKey)
     }
 
     func setSearchURLTemplate(_ template: String) {
         defaults.set(template, forKey: searchURLTemplateKey)
+    }
+
+    func setScreenshotSaveDirectory(_ path: String) {
+        defaults.set(path, forKey: screenshotSaveDirectoryKey)
+    }
+
+    func setScreenshotCopiesToClipboard(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: screenshotCopiesToClipboardKey)
+    }
+
+    func setScreenshotSelectsRegion(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: screenshotSelectsRegionKey)
     }
 
     func clearPersistentData() {
@@ -200,7 +245,7 @@ final class SettingsStore {
             result.append(action)
         }
 
-        for action in ToolbarAction.allCases where !result.contains(action) {
+        for action in ToolbarAction.configurableCases where !result.contains(action) {
             result.append(action)
         }
 
@@ -357,6 +402,12 @@ enum AlertPresenter {
 private func removeEventMonitor(_ monitor: inout Any?) {
     if let eventMonitor = monitor { NSEvent.removeMonitor(eventMonitor) }
     monitor = nil
+}
+
+private extension NSRect {
+    var area: CGFloat {
+        width * height
+    }
 }
 
 @MainActor
@@ -558,12 +609,30 @@ final class SelectionToolbarWindow: FloatingOverlayPanel {
     func show(actions: [ToolbarAction], near point: NSPoint) {
         guard !actions.isEmpty else { return orderOut(nil) }
 
+        animationBehavior = .default
+        alphaValue = 1
         rebuildButtons(actions: actions)
         let size = NSSize(width: Metrics.width(for: actions.count), height: Metrics.height)
         setFrame(NSRect(origin: .zero, size: size), display: false)
         layoutButtons()
         setFrameOrigin(clampedOrigin(near: point, size: size))
         orderFrontRegardless()
+    }
+
+    func hide(immediately: Bool) {
+        guard isVisible else { return }
+        guard immediately else {
+            orderOut(nil)
+            return
+        }
+
+        let originalAnimationBehavior = animationBehavior
+        animationBehavior = .none
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            orderOut(nil)
+        }
+        animationBehavior = originalAnimationBehavior
     }
 
     private func rebuildButtons(actions: [ToolbarAction]) {
@@ -777,6 +846,312 @@ final class ToastWindow: GlassTextWindow {
 }
 
 @MainActor
+final class ScreenshotSelectionWindow: NSPanel {
+    private let selectionView = ScreenshotSelectionView()
+
+    init() {
+        super.init(
+            contentRect: .zero,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+
+        isReleasedWhenClosed = false
+        hidesOnDeactivate = false
+        canHide = false
+        level = .screenSaver
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        backgroundColor = .black
+        isOpaque = true
+        hasShadow = false
+        contentView = selectionView
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    func show(
+        image: CGImage,
+        screenFrame: NSRect,
+        initialSelection: NSRect,
+        onConfirm: @escaping (CGImage) -> Void,
+        onFailure: @escaping () -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        setFrame(screenFrame, display: true)
+        selectionView.configure(
+            image: image,
+            initialSelection: initialSelection,
+            onConfirm: { [weak self] selection in
+                guard let self else { return }
+                self.orderOut(nil)
+                guard let croppedImage = Self.crop(image, selection: selection, screenSize: screenFrame.size) else {
+                    onFailure()
+                    return
+                }
+                onConfirm(croppedImage)
+            },
+            onCancel: { [weak self] in
+                self?.orderOut(nil)
+                onCancel()
+            }
+        )
+        orderFrontRegardless()
+        makeKey()
+    }
+
+    private static func crop(_ image: CGImage, selection: NSRect, screenSize: NSSize) -> CGImage? {
+        guard selection.width >= 1, selection.height >= 1, screenSize.width > 0, screenSize.height > 0 else {
+            return nil
+        }
+
+        let scaleX = CGFloat(image.width) / screenSize.width
+        let scaleY = CGFloat(image.height) / screenSize.height
+        let imageBounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let cropRect = CGRect(
+            x: selection.minX * scaleX,
+            y: (screenSize.height - selection.maxY) * scaleY,
+            width: selection.width * scaleX,
+            height: selection.height * scaleY
+        ).integral.intersection(imageBounds)
+
+        guard cropRect.width >= 1, cropRect.height >= 1 else {
+            return nil
+        }
+
+        return image.cropping(to: cropRect)
+    }
+}
+
+@MainActor
+final class ScreenshotSelectionView: NSView {
+    private enum Corner {
+        case minXMinY
+        case minXMaxY
+        case maxXMinY
+        case maxXMaxY
+    }
+
+    private enum Metrics {
+        static let minSelectionSize: CGFloat = 18
+        static let handleRadius: CGFloat = 7
+        static let handleHitRadius: CGFloat = 18
+        static let confirmSize = NSSize(width: 44, height: 36)
+        static let confirmGap: CGFloat = 12
+    }
+
+    private var previewImage: NSImage?
+    private var selection = NSRect.zero
+    private var draggedCorner: Corner?
+    private var onConfirm: ((NSRect) -> Void)?
+    private var onCancel: (() -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    func configure(
+        image: CGImage,
+        initialSelection: NSRect,
+        onConfirm: @escaping (NSRect) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        previewImage = NSImage(cgImage: image, size: bounds.size)
+        selection = Self.normalized(initialSelection).intersection(bounds)
+        if selection.width < Metrics.minSelectionSize || selection.height < Metrics.minSelectionSize {
+            selection = bounds.insetBy(dx: bounds.width * 0.25, dy: bounds.height * 0.25)
+        }
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let previewImage else { return }
+
+        previewImage.draw(in: bounds)
+
+        NSColor.black.withAlphaComponent(0.42).setFill()
+        bounds.fill()
+
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: selection).setClip()
+        previewImage.draw(in: bounds)
+        NSGraphicsContext.restoreGraphicsState()
+
+        drawSelectionBorder()
+        drawHandles()
+        drawConfirmButton()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if confirmFrame.contains(point) {
+            confirm()
+            return
+        }
+
+        draggedCorner = corner(at: point)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let draggedCorner else { return }
+        let point = clamped(convert(event.locationInWindow, from: nil))
+        updateSelection(corner: draggedCorner, point: point)
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        draggedCorner = nil
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == kVK_Escape {
+            cancel()
+        } else if event.keyCode == kVK_Return {
+            confirm()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    private var confirmFrame: NSRect {
+        let preferredX = selection.maxX - Metrics.confirmSize.width
+        let preferredY = selection.minY - Metrics.confirmGap - Metrics.confirmSize.height
+        let x = min(max(preferredX, bounds.minX + 8), bounds.maxX - Metrics.confirmSize.width - 8)
+        let y = preferredY >= bounds.minY + 8
+            ? preferredY
+            : min(selection.maxY + Metrics.confirmGap, bounds.maxY - Metrics.confirmSize.height - 8)
+        return NSRect(origin: NSPoint(x: x, y: y), size: Metrics.confirmSize)
+    }
+
+    private func drawSelectionBorder() {
+        NSColor.white.setStroke()
+        let path = NSBezierPath(rect: selection)
+        path.lineWidth = 2
+        path.stroke()
+    }
+
+    private func drawHandles() {
+        for point in handlePoints {
+            let frame = handleFrame(centeredAt: point)
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: frame).fill()
+
+            NSColor.black.withAlphaComponent(0.45).setStroke()
+            let ring = NSBezierPath(ovalIn: frame)
+            ring.lineWidth = 1
+            ring.stroke()
+        }
+    }
+
+    private func drawConfirmButton() {
+        let frame = confirmFrame
+        NSColor.systemBlue.setFill()
+        let path = NSBezierPath(roundedRect: frame, xRadius: 12, yRadius: 12)
+        path.fill()
+
+        NSColor.white.set()
+        let text = "✓" as NSString
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 22, weight: .bold),
+            .foregroundColor: NSColor.white
+        ]
+        let textSize = text.size(withAttributes: attributes)
+        text.draw(
+            at: NSPoint(x: frame.midX - textSize.width / 2, y: frame.midY - textSize.height / 2),
+            withAttributes: attributes
+        )
+    }
+
+    private var handlePoints: [NSPoint] {
+        [
+            NSPoint(x: selection.minX, y: selection.minY),
+            NSPoint(x: selection.minX, y: selection.maxY),
+            NSPoint(x: selection.maxX, y: selection.minY),
+            NSPoint(x: selection.maxX, y: selection.maxY)
+        ]
+    }
+
+    private func corner(at point: NSPoint) -> Corner? {
+        let corners: [(Corner, NSPoint)] = [
+            (.minXMinY, NSPoint(x: selection.minX, y: selection.minY)),
+            (.minXMaxY, NSPoint(x: selection.minX, y: selection.maxY)),
+            (.maxXMinY, NSPoint(x: selection.maxX, y: selection.minY)),
+            (.maxXMaxY, NSPoint(x: selection.maxX, y: selection.maxY))
+        ]
+
+        return corners.first { _, cornerPoint in
+            hypot(point.x - cornerPoint.x, point.y - cornerPoint.y) <= Metrics.handleHitRadius
+        }?.0
+    }
+
+    private func handleFrame(centeredAt point: NSPoint) -> NSRect {
+        NSRect(
+            x: point.x - Metrics.handleRadius,
+            y: point.y - Metrics.handleRadius,
+            width: Metrics.handleRadius * 2,
+            height: Metrics.handleRadius * 2
+        )
+    }
+
+    private func updateSelection(corner: Corner, point: NSPoint) {
+        var minX = selection.minX
+        var maxX = selection.maxX
+        var minY = selection.minY
+        var maxY = selection.maxY
+
+        switch corner {
+        case .minXMinY:
+            minX = min(point.x, maxX - Metrics.minSelectionSize)
+            minY = min(point.y, maxY - Metrics.minSelectionSize)
+        case .minXMaxY:
+            minX = min(point.x, maxX - Metrics.minSelectionSize)
+            maxY = max(point.y, minY + Metrics.minSelectionSize)
+        case .maxXMinY:
+            maxX = max(point.x, minX + Metrics.minSelectionSize)
+            minY = min(point.y, maxY - Metrics.minSelectionSize)
+        case .maxXMaxY:
+            maxX = max(point.x, minX + Metrics.minSelectionSize)
+            maxY = max(point.y, minY + Metrics.minSelectionSize)
+        }
+
+        selection = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).intersection(bounds)
+    }
+
+    private func clamped(_ point: NSPoint) -> NSPoint {
+        NSPoint(
+            x: min(max(point.x, bounds.minX), bounds.maxX),
+            y: min(max(point.y, bounds.minY), bounds.maxY)
+        )
+    }
+
+    private static func normalized(_ rect: NSRect) -> NSRect {
+        NSRect(
+            x: min(rect.minX, rect.maxX),
+            y: min(rect.minY, rect.maxY),
+            width: abs(rect.width),
+            height: abs(rect.height)
+        )
+    }
+
+    private func confirm() {
+        let selectedRect = selection
+        clearImage()
+        onConfirm?(selectedRect)
+    }
+
+    private func cancel() {
+        clearImage()
+        onCancel?()
+    }
+
+    private func clearImage() {
+        previewImage = nil
+    }
+}
+
+@MainActor
 final class SelectionToolbarController {
     private enum Metrics {
         static let dragThresholdSquared: CGFloat = 36
@@ -795,9 +1170,11 @@ final class SelectionToolbarController {
 
     private let toolbarWindow = SelectionToolbarWindow()
     private let toastWindow = ToastWindow()
+    private lazy var screenshotSelectionWindow = ScreenshotSelectionWindow()
     private var eventMonitor: Any?
     private var currentSettings: AppSettings
     private var mouseDownLocation: NSPoint?
+    private var selectionRect: CGRect?
     private var selectionTargetPID: pid_t?
     private var pendingShow: DispatchWorkItem?
 
@@ -867,23 +1244,33 @@ final class SelectionToolbarController {
 
     private func finishSelectionTracking() {
         let point = NSEvent.mouseLocation
-        guard isDragSelection(endingAt: point) else {
+        guard let rect = dragSelectionRect(endingAt: point) else {
             reset(shouldHideToolbar: true, clearTarget: true)
             return
         }
 
+        selectionRect = rect
         mouseDownLocation = nil
         showToolbarSoon(near: point)
     }
 
-    private func isDragSelection(endingAt point: NSPoint) -> Bool {
+    private func dragSelectionRect(endingAt point: NSPoint) -> CGRect? {
         guard let start = mouseDownLocation else {
-            return false
+            return nil
         }
 
         let dx = point.x - start.x
         let dy = point.y - start.y
-        return dx * dx + dy * dy >= Metrics.dragThresholdSquared
+        guard dx * dx + dy * dy >= Metrics.dragThresholdSquared else {
+            return nil
+        }
+
+        return CGRect(
+            x: min(start.x, point.x),
+            y: min(start.y, point.y),
+            width: abs(dx),
+            height: abs(dy)
+        )
     }
 
     private func showToolbarSoon(near point: NSPoint) {
@@ -907,7 +1294,8 @@ final class SelectionToolbarController {
 
     private func perform(_ action: ToolbarAction) {
         let pid = selectionTargetPID
-        reset(shouldHideToolbar: true, clearTarget: true)
+        let rect = selectionRect
+        reset(shouldHideToolbar: true, hidesToolbarImmediately: action == .screenshot, clearTarget: true)
         restoreTarget(pid)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Metrics.shortcutDelay) { [weak self] in
@@ -917,8 +1305,154 @@ final class SelectionToolbarController {
                 Self.postCommandShortcut(keyCode)
             case .search:
                 self?.copySelectionAndSearch()
+            case .screenshot:
+                self?.captureSelection(rect)
             }
         }
+    }
+
+    private func captureSelection(_ rect: CGRect?) {
+        guard let rect, rect.width >= 1, rect.height >= 1 else {
+            showToast("截图区域无效")
+            return
+        }
+
+        if currentSettings.screenshotSelectsRegion {
+            captureFullScreenForRegionSelection(initialRect: rect)
+            return
+        }
+
+        guard let captureRect = Self.screenCaptureRect(fromAppKitRect: rect) else {
+            showToast("截图区域无效")
+            return
+        }
+
+        captureImage(in: captureRect) { [weak self] image in
+            self?.finishScreenshot(image)
+        }
+    }
+
+    private func captureFullScreenForRegionSelection(initialRect rect: CGRect) {
+        let appKitRect = NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)
+        guard let screen = Self.screen(containing: appKitRect),
+              let fullScreenCaptureRect = Self.screenCaptureRect(fromAppKitRect: screen.frame) else {
+            showToast("截图区域无效")
+            return
+        }
+        let screenFrame = screen.frame
+
+        captureImage(in: fullScreenCaptureRect) { [weak self] image in
+            guard let self else { return }
+            let clippedSelection = appKitRect.intersection(screenFrame)
+            let localSelection = NSRect(
+                x: clippedSelection.minX - screenFrame.minX,
+                y: clippedSelection.minY - screenFrame.minY,
+                width: clippedSelection.width,
+                height: clippedSelection.height
+            )
+
+            self.screenshotSelectionWindow.show(
+                image: image,
+                screenFrame: screenFrame,
+                initialSelection: localSelection,
+                onConfirm: { [weak self] croppedImage in
+                    self?.finishScreenshot(croppedImage)
+                },
+                onFailure: { [weak self] in
+                    self?.showToast("截图失败")
+                },
+                onCancel: {}
+            )
+        }
+    }
+
+    private func captureImage(in rect: CGRect, completion: @MainActor @Sendable @escaping (CGImage) -> Void) {
+        SCScreenshotManager.captureImage(in: rect) { [weak self] image, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let image else {
+                    self.showToast("截图失败")
+                    return
+                }
+
+                completion(image)
+            }
+        }
+    }
+
+    private func finishScreenshot(_ image: CGImage) {
+        do {
+            if currentSettings.screenshotCopiesToClipboard {
+                Self.copyScreenshotToPasteboard(image)
+            }
+
+            let url = try Self.saveScreenshot(image, toDirectoryAt: currentSettings.screenshotSaveDirectory)
+            showToast("已保存截图：\(url.lastPathComponent)")
+        } catch {
+            showToast("截图失败")
+        }
+    }
+
+    private static func screenCaptureRect(fromAppKitRect rect: CGRect) -> CGRect? {
+        let appKitRect = NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)
+        guard let screen = screen(containing: appKitRect),
+              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            return nil
+        }
+
+        let clippedRect = appKitRect.intersection(screen.frame)
+        guard clippedRect.width >= 1, clippedRect.height >= 1 else {
+            return nil
+        }
+
+        let displayBounds = CGDisplayBounds(displayID)
+        return CGRect(
+            x: displayBounds.minX + clippedRect.minX - screen.frame.minX,
+            y: displayBounds.minY + screen.frame.maxY - clippedRect.maxY,
+            width: clippedRect.width,
+            height: clippedRect.height
+        )
+    }
+
+    private static func screen(containing rect: NSRect) -> NSScreen? {
+        NSScreen.screens
+            .filter { $0.frame.intersects(rect) }
+            .max { $0.frame.intersection(rect).area < $1.frame.intersection(rect).area }
+    }
+
+    private static func copyScreenshotToPasteboard(_ image: CGImage) {
+        let nsImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects([nsImage])
+    }
+
+    private static func saveScreenshot(_ image: CGImage, toDirectoryAt path: String) throws -> URL {
+        let directoryURL = path.isEmpty ? defaultScreenshotDirectoryURL() : URL(fileURLWithPath: path, isDirectory: true)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        let fileURL = uniqueScreenshotURL(in: directoryURL, timestamp: formatter.string(from: Date()))
+
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        try data.write(to: fileURL, options: .atomic)
+        return fileURL
+    }
+
+    private static func uniqueScreenshotURL(in directory: URL, timestamp: String) -> URL {
+        let baseName = "截图\(timestamp)"
+        var candidate = directory.appendingPathComponent("\(baseName).png")
+        var index = 2
+
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = directory.appendingPathComponent("\(baseName) \(index).png")
+            index += 1
+        }
+
+        return candidate
     }
 
     private func copySelectionAndSearch() {
@@ -968,20 +1502,21 @@ final class SelectionToolbarController {
         app.activate(options: [])
     }
 
-    private func reset(shouldHideToolbar: Bool, clearTarget: Bool) {
+    private func reset(shouldHideToolbar: Bool, hidesToolbarImmediately: Bool = false, clearTarget: Bool) {
         pendingShow?.cancel()
         pendingShow = nil
         mouseDownLocation = nil
+        selectionRect = nil
         if clearTarget {
             selectionTargetPID = nil
         }
         if shouldHideToolbar {
-            hideToolbar()
+            hideToolbar(immediately: hidesToolbarImmediately)
         }
     }
 
-    private func hideToolbar() {
-        toolbarWindow.orderOut(nil)
+    private func hideToolbar(immediately: Bool = false) {
+        toolbarWindow.hide(immediately: immediately)
     }
 
     private static func searchableText(from pasteboard: NSPasteboard) -> String? {
@@ -1035,6 +1570,9 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
     var onSelectionToolbarActionMoved: ((ToolbarAction, Int) -> Void)?
     var onSearchTemplateChanged: ((String) -> Void)?
+    var onScreenshotSaveDirectoryChanged: ((String) -> Void)?
+    var onScreenshotCopiesToClipboardChanged: ((Bool) -> Void)?
+    var onScreenshotSelectsRegionChanged: ((Bool) -> Void)?
     var onLoginItemChanged: ((Bool) -> Void)?
     var onLoginItemGuide: (() -> Void)?
     var onAccessibilityEnableRequested: (() -> Void)?
@@ -1073,6 +1611,9 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
         controlView.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.onSelectionToolbarActionChanged?(action, isEnabled) }
         controlView.onSelectionToolbarActionMoved = { [weak self] action, direction in self?.onSelectionToolbarActionMoved?(action, direction) }
         controlView.onSearchTemplateChanged = { [weak self] template in self?.onSearchTemplateChanged?(template) }
+        controlView.onScreenshotSaveDirectoryChanged = { [weak self] path in self?.onScreenshotSaveDirectoryChanged?(path) }
+        controlView.onScreenshotCopiesToClipboardChanged = { [weak self] isEnabled in self?.onScreenshotCopiesToClipboardChanged?(isEnabled) }
+        controlView.onScreenshotSelectsRegionChanged = { [weak self] isEnabled in self?.onScreenshotSelectsRegionChanged?(isEnabled) }
         controlView.onLoginItemChanged = { [weak self] isEnabled in self?.onLoginItemChanged?(isEnabled) }
         controlView.onLoginItemGuide = { [weak self] in self?.onLoginItemGuide?() }
         controlView.onAccessibilityEnableRequested = { [weak self] in self?.onAccessibilityEnableRequested?() }
@@ -1225,6 +1766,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         case capsLockSettings
         case selectionToolbarSettings
         case searchSettings
+        case screenshotSettings
     }
 
     private enum Metrics {
@@ -1238,7 +1780,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
     }
 
     private var page: Page = .modules
-    private var selectionToolbarOrder = ToolbarAction.allCases
+    private var selectionToolbarOrder = ToolbarAction.configurableCases
     private var isAccessibilityEnabledForDisplay = false
 
     private let glassContainer = NSGlassEffectContainerView()
@@ -1265,8 +1807,13 @@ final class ControlView: NSView, NSTextFieldDelegate {
     private let copyRow = ActionSettingRow(action: .copy)
     private let pasteRow = ActionSettingRow(action: .paste)
     private let searchRow = ActionSettingRow(action: .search, showsSettingsButton: true)
+    private let screenshotRow = ActionSettingRow(action: .screenshot, showsSettingsButton: true)
     private let searchEnginePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let searchTemplateField = NSTextField(string: "")
+    private let screenshotSaveLabel = NSTextField(labelWithString: "截图后保存到：")
+    private let screenshotSaveButton = NSButton(title: "", target: nil, action: nil)
+    private let screenshotCopyCheckbox = NSButton(checkboxWithTitle: "截图后复制到剪贴板", target: nil, action: nil)
+    private let screenshotRegionCheckbox = NSButton(checkboxWithTitle: "截图时框选区域", target: nil, action: nil)
 
     var onCapsLockIndicatorChanged: ((Bool) -> Void)?
     var onClickToDisableChanged: ((Bool) -> Void)?
@@ -1274,6 +1821,9 @@ final class ControlView: NSView, NSTextFieldDelegate {
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
     var onSelectionToolbarActionMoved: ((ToolbarAction, Int) -> Void)?
     var onSearchTemplateChanged: ((String) -> Void)?
+    var onScreenshotSaveDirectoryChanged: ((String) -> Void)?
+    var onScreenshotCopiesToClipboardChanged: ((Bool) -> Void)?
+    var onScreenshotSelectsRegionChanged: ((Bool) -> Void)?
     var onLoginItemChanged: ((Bool) -> Void)?
     var onLoginItemGuide: (() -> Void)?
     var onAccessibilityEnableRequested: (() -> Void)?
@@ -1303,9 +1853,11 @@ final class ControlView: NSView, NSTextFieldDelegate {
         copyRow.setEnabled(settings.isSelectionToolbarCopyEnabled)
         pasteRow.setEnabled(settings.isSelectionToolbarPasteEnabled)
         searchRow.setEnabled(settings.isSelectionToolbarSearchEnabled)
+        screenshotRow.setEnabled(settings.isSelectionToolbarScreenshotEnabled)
         if searchTemplateField.stringValue != settings.searchURLTemplate {
             searchTemplateField.stringValue = settings.searchURLTemplate
         }
+        renderScreenshotSettings(settings)
         layoutForCurrentPage()
     }
 
@@ -1371,12 +1923,13 @@ final class ControlView: NSView, NSTextFieldDelegate {
         quitButton.target = self
         quitButton.action = #selector(quitClicked)
 
-        [copyRow, pasteRow, searchRow].forEach { row in
+        [copyRow, pasteRow, searchRow, screenshotRow].forEach { row in
             row.onToggle = { [weak self] action, isEnabled in self?.onSelectionToolbarActionChanged?(action, isEnabled) }
             row.onMove = { [weak self] action, direction in self?.onSelectionToolbarActionMoved?(action, direction) }
             addSubview(row)
         }
         searchRow.onSettings = { [weak self] _ in self?.showSearchSettingsPage() }
+        screenshotRow.onSettings = { [weak self] _ in self?.showScreenshotSettingsPage() }
 
         searchEnginePopup.addItems(withTitles: SearchEnginePreset.all.map(\.title))
         searchEnginePopup.bezelStyle = .glass
@@ -1391,6 +1944,20 @@ final class ControlView: NSView, NSTextFieldDelegate {
         searchTemplateField.target = self
         searchTemplateField.action = #selector(searchTemplateCommitted)
         addSubview(searchTemplateField)
+
+        screenshotSaveLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        screenshotSaveLabel.textColor = .labelColor
+        addSubview(screenshotSaveLabel)
+
+        screenshotSaveButton.bezelStyle = .glass
+        screenshotSaveButton.alignment = .left
+        screenshotSaveButton.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        screenshotSaveButton.target = self
+        screenshotSaveButton.action = #selector(screenshotSaveDirectoryClicked)
+        addSubview(screenshotSaveButton)
+
+        configureCheckbox(screenshotCopyCheckbox, size: 13, weight: .regular, action: #selector(screenshotCopyCheckboxChanged))
+        configureCheckbox(screenshotRegionCheckbox, size: 13, weight: .regular, action: #selector(screenshotRegionCheckboxChanged))
 
         showModulesPage()
     }
@@ -1451,7 +2018,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
     }
 
     @objc private func backButtonClicked() {
-        if page == .searchSettings {
+        if page == .searchSettings || page == .screenshotSettings {
             showSelectionToolbarSettingsPage()
         } else {
             showModulesPage()
@@ -1478,6 +2045,11 @@ final class ControlView: NSView, NSTextFieldDelegate {
         layoutForCurrentPage()
     }
 
+    private func showScreenshotSettingsPage() {
+        page = .screenshotSettings
+        layoutForCurrentPage()
+    }
+
     @objc private func searchEngineSelected() {
         let index = searchEnginePopup.indexOfSelectedItem
         guard SearchEnginePreset.all.indices.contains(index) else { return }
@@ -1496,6 +2068,31 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
     private func commitSearchTemplate() {
         onSearchTemplateChanged?(searchTemplateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    @objc private func screenshotSaveDirectoryClicked() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "选择"
+        panel.directoryURL = URL(fileURLWithPath: screenshotSaveButton.toolTip ?? screenshotSaveButton.title, isDirectory: true)
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        screenshotSaveButton.title = Self.displayName(forDirectoryAt: url.path)
+        onScreenshotSaveDirectoryChanged?(url.path)
+    }
+
+    @objc private func screenshotCopyCheckboxChanged() {
+        onScreenshotCopiesToClipboardChanged?(screenshotCopyCheckbox.state == .on)
+    }
+
+    @objc private func screenshotRegionCheckboxChanged() {
+        onScreenshotSelectsRegionChanged?(screenshotRegionCheckbox.state == .on)
     }
 
     private func layoutForCurrentPage() {
@@ -1527,6 +2124,8 @@ final class ControlView: NSView, NSTextFieldDelegate {
             }
         case .searchSettings:
             layoutSearchSettingsPage()
+        case .screenshotSettings:
+            layoutScreenshotSettingsPage()
         }
     }
 
@@ -1623,6 +2222,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         case .copy: return copyRow
         case .paste: return pasteRow
         case .search: return searchRow
+        case .screenshot: return screenshotRow
         }
     }
 
@@ -1644,6 +2244,33 @@ final class ControlView: NSView, NSTextFieldDelegate {
             width: contentWidth,
             height: 32
         )
+    }
+
+    private func layoutScreenshotSettingsPage() {
+        layoutSettingsBase(title: "截图")
+        show(screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox, screenshotRegionCheckbox)
+
+        let contentX = settingsCard.frame.minX + Metrics.sectionInset
+        let contentWidth = settingsCard.frame.width - Metrics.sectionInset * 2
+        screenshotSaveLabel.sizeToFit()
+        screenshotSaveLabel.frame.origin = NSPoint(
+            x: contentX,
+            y: settingsCard.frame.maxY - Metrics.sectionInset - screenshotSaveLabel.frame.height
+        )
+        screenshotSaveButton.frame = NSRect(
+            x: contentX,
+            y: screenshotSaveLabel.frame.minY - 42,
+            width: contentWidth,
+            height: 32
+        )
+
+        layoutCheckbox(screenshotCopyCheckbox, below: screenshotSaveButton.frame, gap: 42, contentX: contentX)
+        layoutCheckbox(screenshotRegionCheckbox, below: screenshotCopyCheckbox.frame, gap: 34, contentX: contentX)
+    }
+
+    private func layoutCheckbox(_ checkbox: NSButton, below frame: NSRect, gap: CGFloat, contentX: CGFloat) {
+        checkbox.sizeToFit()
+        checkbox.frame.origin = NSPoint(x: contentX, y: frame.minY - gap)
     }
 
     private func layoutSettingsBase(title: String) {
@@ -1680,9 +2307,22 @@ final class ControlView: NSView, NSTextFieldDelegate {
         titleLabel, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard,
         loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, clickToDisableCheckbox,
         capsLockSettingsButton, selectionToolbarSettingsButton, backButton,
-        loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, copyRow, pasteRow, searchRow,
-        searchEnginePopup, searchTemplateField
+        loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, copyRow, pasteRow, searchRow, screenshotRow,
+        searchEnginePopup, searchTemplateField, screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox,
+        screenshotRegionCheckbox
     ]
+
+    private static func displayName(forDirectoryAt path: String) -> String {
+        let directoryURL = path.isEmpty ? defaultScreenshotDirectoryURL() : URL(fileURLWithPath: path, isDirectory: true)
+        return directoryURL.path
+    }
+
+    private func renderScreenshotSettings(_ settings: AppSettings) {
+        screenshotSaveButton.title = Self.displayName(forDirectoryAt: settings.screenshotSaveDirectory)
+        screenshotSaveButton.toolTip = settings.screenshotSaveDirectory
+        screenshotCopyCheckbox.state = settings.screenshotCopiesToClipboard ? .on : .off
+        screenshotRegionCheckbox.state = settings.screenshotSelectsRegion ? .on : .off
+    }
 }
 
 @MainActor
@@ -1894,6 +2534,9 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.setSelectionToolbarAction(action, enabled: isEnabled) }
         controlWindow.onSelectionToolbarActionMoved = { [weak self] action, direction in self?.moveSelectionToolbarAction(action, direction: direction) }
         controlWindow.onSearchTemplateChanged = { [weak self] template in self?.setSearchURLTemplate(template) }
+        controlWindow.onScreenshotSaveDirectoryChanged = { [weak self] path in self?.setScreenshotSaveDirectory(path) }
+        controlWindow.onScreenshotCopiesToClipboardChanged = { [weak self] isEnabled in self?.setScreenshotCopiesToClipboard(isEnabled) }
+        controlWindow.onScreenshotSelectsRegionChanged = { [weak self] isEnabled in self?.setScreenshotSelectsRegion(isEnabled) }
         controlWindow.onLoginItemChanged = { [weak self] isEnabled in self?.setLoginItemEnabled(isEnabled) }
         controlWindow.onLoginItemGuide = { [weak self] in self?.openLoginItemSettings() }
         controlWindow.onAccessibilityEnableRequested = { [weak self] in self?.enableAccessibilityGuide() }
@@ -2126,6 +2769,24 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         settingsStore.setSearchURLTemplate(template)
         currentSettings.searchURLTemplate = template
         selectionToolbarController.update(settings: currentSettings)
+    }
+
+    private func setScreenshotSaveDirectory(_ path: String) {
+        settingsStore.setScreenshotSaveDirectory(path)
+        currentSettings.screenshotSaveDirectory = path
+        refreshSelectionToolbarSettings()
+    }
+
+    private func setScreenshotCopiesToClipboard(_ isEnabled: Bool) {
+        settingsStore.setScreenshotCopiesToClipboard(isEnabled)
+        currentSettings.screenshotCopiesToClipboard = isEnabled
+        refreshSelectionToolbarSettings()
+    }
+
+    private func setScreenshotSelectsRegion(_ isEnabled: Bool) {
+        settingsStore.setScreenshotSelectsRegion(isEnabled)
+        currentSettings.screenshotSelectsRegion = isEnabled
+        refreshSelectionToolbarSettings()
     }
 
     private func refreshSelectionToolbarSettings() {
