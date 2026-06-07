@@ -1,0 +1,49 @@
+import AppKit
+@preconcurrency import ApplicationServices
+import Carbon
+import Darwin
+import IOKit
+import IOKit.hidsystem
+import ScreenCaptureKit
+import ServiceManagement
+
+@MainActor
+enum LiquidGlassOverlayStyle {
+    private static let overlayTextShadow: NSShadow = {
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.74)
+        shadow.shadowBlurRadius = 2.8
+        shadow.shadowOffset = NSSize(width: 0, height: -1.0)
+        return shadow
+    }()
+
+    static func configureGlass(_ view: NSGlassEffectView, cornerRadius: CGFloat) {
+        view.style = .clear
+        view.tintColor = nil
+        view.cornerRadius = cornerRadius
+    }
+
+    static func primaryTextColor() -> NSColor {
+        NSColor.white.withAlphaComponent(0.96)
+    }
+
+    static func hoverBackgroundColor() -> CGColor {
+        NSColor.controlAccentColor.cgColor
+    }
+
+    static func textShadow() -> NSShadow {
+        overlayTextShadow
+    }
+
+    static func attributedText(_ text: String, font: NSFont) -> NSAttributedString {
+        NSAttributedString(
+            string: text,
+            attributes: [
+                .foregroundColor: primaryTextColor(),
+                .font: font,
+                .shadow: textShadow()
+            ]
+        )
+    }
+}
+
