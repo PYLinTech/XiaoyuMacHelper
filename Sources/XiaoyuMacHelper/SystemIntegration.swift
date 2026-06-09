@@ -1,10 +1,5 @@
 import AppKit
 @preconcurrency import ApplicationServices
-import Carbon
-import Darwin
-import IOKit
-import IOKit.hidsystem
-import ScreenCaptureKit
 import ServiceManagement
 
 final class SingleInstanceLock {
@@ -107,6 +102,10 @@ enum SystemSettingsOpener {
 
     static func openAccessibility() {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+    }
+
+    static func openCameraPrivacy() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
     }
 
     private static func open(_ urlString: String) {

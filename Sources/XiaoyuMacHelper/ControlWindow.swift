@@ -1,25 +1,22 @@
 import AppKit
-@preconcurrency import ApplicationServices
-import Carbon
-import Darwin
-import IOKit
-import IOKit.hidsystem
-import ScreenCaptureKit
-import ServiceManagement
 
 @MainActor
 final class ControlWindow: NSWindow, NSWindowDelegate {
-    private let controlView = ControlView(frame: NSRect(x: 0, y: 0, width: 520, height: 420))
+    private let controlView = ControlView(frame: NSRect(x: 0, y: 0, width: 520, height: 450))
 
     var onCapsLockIndicatorChanged: ((Bool) -> Void)?
     var onClickToDisableChanged: ((Bool) -> Void)?
     var onSelectionToolbarChanged: ((Bool) -> Void)?
+    var onActiveVisionChanged: ((Bool) -> Void)?
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
     var onSelectionToolbarActionMoved: ((ToolbarAction, Int) -> Void)?
     var onSearchTemplateChanged: ((String) -> Void)?
     var onScreenshotSaveDirectoryChanged: ((String) -> Void)?
     var onScreenshotCopiesToClipboardChanged: ((Bool) -> Void)?
     var onScreenshotSelectsRegionChanged: ((Bool) -> Void)?
+    var onActiveVisionGazeChanged: ((Bool) -> Void)?
+    var onActiveVisionFacingChanged: ((Bool) -> Void)?
+    var onActiveVisionNotifyChanged: ((Bool) -> Void)?
     var onLoginItemChanged: ((Bool) -> Void)?
     var onLoginItemGuide: (() -> Void)?
     var onAccessibilityEnableRequested: (() -> Void)?
@@ -33,7 +30,7 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 450),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -55,12 +52,16 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
         controlView.onCapsLockIndicatorChanged = { [weak self] isEnabled in self?.onCapsLockIndicatorChanged?(isEnabled) }
         controlView.onClickToDisableChanged = { [weak self] isEnabled in self?.onClickToDisableChanged?(isEnabled) }
         controlView.onSelectionToolbarChanged = { [weak self] isEnabled in self?.onSelectionToolbarChanged?(isEnabled) }
+        controlView.onActiveVisionChanged = { [weak self] isEnabled in self?.onActiveVisionChanged?(isEnabled) }
         controlView.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.onSelectionToolbarActionChanged?(action, isEnabled) }
         controlView.onSelectionToolbarActionMoved = { [weak self] action, direction in self?.onSelectionToolbarActionMoved?(action, direction) }
         controlView.onSearchTemplateChanged = { [weak self] template in self?.onSearchTemplateChanged?(template) }
         controlView.onScreenshotSaveDirectoryChanged = { [weak self] path in self?.onScreenshotSaveDirectoryChanged?(path) }
         controlView.onScreenshotCopiesToClipboardChanged = { [weak self] isEnabled in self?.onScreenshotCopiesToClipboardChanged?(isEnabled) }
         controlView.onScreenshotSelectsRegionChanged = { [weak self] isEnabled in self?.onScreenshotSelectsRegionChanged?(isEnabled) }
+        controlView.onActiveVisionGazeChanged = { [weak self] isEnabled in self?.onActiveVisionGazeChanged?(isEnabled) }
+        controlView.onActiveVisionFacingChanged = { [weak self] isEnabled in self?.onActiveVisionFacingChanged?(isEnabled) }
+        controlView.onActiveVisionNotifyChanged = { [weak self] isEnabled in self?.onActiveVisionNotifyChanged?(isEnabled) }
         controlView.onLoginItemChanged = { [weak self] isEnabled in self?.onLoginItemChanged?(isEnabled) }
         controlView.onLoginItemGuide = { [weak self] in self?.onLoginItemGuide?() }
         controlView.onAccessibilityEnableRequested = { [weak self] in self?.onAccessibilityEnableRequested?() }

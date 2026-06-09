@@ -1,11 +1,8 @@
 import AppKit
-@preconcurrency import ApplicationServices
 import Carbon
 import Darwin
 import IOKit
 import IOKit.hidsystem
-import ScreenCaptureKit
-import ServiceManagement
 
 @MainActor
 final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
@@ -21,6 +18,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private lazy var currentSettings = settingsStore.read()
     private let capsLockWindow = CapsLockWindow()
     private lazy var selectionToolbarController = SelectionToolbarController(settings: currentSettings)
+    private lazy var activeVisionController = ActiveVisionController(settings: currentSettings)
     private lazy var controlWindow = ControlWindow()
     private var pollTimer: Timer?
     private var statusPollTimer: Timer?
@@ -42,6 +40,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         bindCallbacks()
         setupObservers()
         selectionToolbarController.start()
+        activeVisionController.start()
         updateCapsLockPolling()
         updateCapsLockWindow(force: true)
         if launchMode.showsControlWindowOnLaunch {
@@ -54,12 +53,16 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.onCapsLockIndicatorChanged = { [weak self] isEnabled in self?.setCapsLockIndicatorEnabled(isEnabled) }
         controlWindow.onClickToDisableChanged = { [weak self] isEnabled in self?.setClickToDisableEnabled(isEnabled) }
         controlWindow.onSelectionToolbarChanged = { [weak self] isEnabled in self?.setSelectionToolbarEnabled(isEnabled) }
+        controlWindow.onActiveVisionChanged = { [weak self] isEnabled in self?.setActiveVisionEnabled(isEnabled) }
         controlWindow.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.setSelectionToolbarAction(action, enabled: isEnabled) }
         controlWindow.onSelectionToolbarActionMoved = { [weak self] action, direction in self?.moveSelectionToolbarAction(action, direction: direction) }
         controlWindow.onSearchTemplateChanged = { [weak self] template in self?.setSearchURLTemplate(template) }
         controlWindow.onScreenshotSaveDirectoryChanged = { [weak self] path in self?.setScreenshotSaveDirectory(path) }
         controlWindow.onScreenshotCopiesToClipboardChanged = { [weak self] isEnabled in self?.setScreenshotCopiesToClipboard(isEnabled) }
         controlWindow.onScreenshotSelectsRegionChanged = { [weak self] isEnabled in self?.setScreenshotSelectsRegion(isEnabled) }
+        controlWindow.onActiveVisionGazeChanged = { [weak self] isEnabled in self?.setActiveVisionPreventsDisplaySleepOnGaze(isEnabled) }
+        controlWindow.onActiveVisionFacingChanged = { [weak self] isEnabled in self?.setActiveVisionPreventsDisplaySleepOnFacing(isEnabled) }
+        controlWindow.onActiveVisionNotifyChanged = { [weak self] isEnabled in self?.setActiveVisionNotifyWhenExtendingDisplaySleep(isEnabled) }
         controlWindow.onLoginItemChanged = { [weak self] isEnabled in self?.setLoginItemEnabled(isEnabled) }
         controlWindow.onLoginItemGuide = { [weak self] in self?.openLoginItemSettings() }
         controlWindow.onAccessibilityEnableRequested = { [weak self] in self?.enableAccessibilityGuide() }
@@ -90,6 +93,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         pollTimer = nil
         stopStatusPolling()
         selectionToolbarController.stop()
+        activeVisionController.stop()
         instanceLock.releaseLock()
     }
 
@@ -274,6 +278,72 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         settingsStore.setSelectionToolbarEnabled(isEnabled)
         currentSettings.isSelectionToolbarEnabled = isEnabled
         refreshSelectionToolbarSettings()
+    }
+
+    private func setActiveVisionEnabled(_ isEnabled: Bool) {
+        guard isEnabled else {
+            applyActiveVisionEnabled(false)
+            return
+        }
+
+        guard CameraPermission.isAuthorized else {
+            applyActiveVisionEnabled(false)
+            AlertPresenter.show(
+                title: "需要摄像头权限",
+                message: "主动视觉感知将在您息屏前使用摄像头进行本地分析，不会存储任何您的信息。\n\n点击“知道了”后将向系统申请摄像头权限。",
+                style: .warning
+            )
+
+            CameraPermission.request { [weak self] isGranted in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+
+                    if isGranted {
+                        self.applyActiveVisionEnabled(true)
+                    } else {
+                        self.applyActiveVisionEnabled(false)
+                        AlertPresenter.show(
+                            title: "无法开启主动视觉感知",
+                            message: "请您在设置页面手动重新授权",
+                            style: .warning
+                        )
+                        SystemSettingsOpener.openCameraPrivacy()
+                    }
+                }
+            }
+            return
+        }
+
+        applyActiveVisionEnabled(true)
+    }
+
+    private func applyActiveVisionEnabled(_ isEnabled: Bool) {
+        settingsStore.setActiveVisionEnabled(isEnabled)
+        currentSettings.isActiveVisionEnabled = isEnabled
+        refreshActiveVisionSettings()
+    }
+
+    private func setActiveVisionPreventsDisplaySleepOnGaze(_ isEnabled: Bool) {
+        settingsStore.setActiveVisionPreventsDisplaySleepOnGaze(isEnabled)
+        currentSettings.activeVisionPreventsDisplaySleepOnGaze = isEnabled
+        refreshActiveVisionSettings()
+    }
+
+    private func setActiveVisionPreventsDisplaySleepOnFacing(_ isEnabled: Bool) {
+        settingsStore.setActiveVisionPreventsDisplaySleepOnFacing(isEnabled)
+        currentSettings.activeVisionPreventsDisplaySleepOnFacing = isEnabled
+        refreshActiveVisionSettings()
+    }
+
+    private func setActiveVisionNotifyWhenExtendingDisplaySleep(_ isEnabled: Bool) {
+        settingsStore.setActiveVisionNotifiesWhenExtendingDisplaySleep(isEnabled)
+        currentSettings.activeVisionNotifiesWhenExtendingDisplaySleep = isEnabled
+        refreshActiveVisionSettings()
+    }
+
+    private func refreshActiveVisionSettings() {
+        renderControlWindow(force: true)
+        activeVisionController.update(settings: currentSettings)
     }
 
     private func setSelectionToolbarAction(_ action: ToolbarAction, enabled isEnabled: Bool) {

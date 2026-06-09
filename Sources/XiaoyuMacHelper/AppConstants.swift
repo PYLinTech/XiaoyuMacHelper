@@ -1,11 +1,4 @@
-import AppKit
-@preconcurrency import ApplicationServices
-import Carbon
-import Darwin
-import IOKit
-import IOKit.hidsystem
-import ScreenCaptureKit
-import ServiceManagement
+import Foundation
 
 let appIdentifier = "local.xiaoyu-mac-helper"
 let loginItemArgument = "--login-item"
@@ -22,6 +15,11 @@ let searchURLTemplateKey = "SearchURLTemplate"
 let screenshotSaveDirectoryKey = "ScreenshotSaveDirectory"
 let screenshotCopiesToClipboardKey = "ScreenshotCopiesToClipboard"
 let screenshotSelectsRegionKey = "ScreenshotSelectsRegion"
+let activeVisionEnabledKey = "ActiveVisionEnabled"
+let activeVisionPreventDisplaySleepOnGazeKey = "ActiveVisionPreventDisplaySleepOnGaze"
+let activeVisionPreventDisplaySleepOnFacingKey = "ActiveVisionPreventDisplaySleepOnFacing"
+let activeVisionNotifyWhenExtendingDisplaySleepKey = "ActiveVisionNotifyWhenExtendingDisplaySleep"
+let activeVisionLeadTimeBeforeDisplaySleep: TimeInterval = 30
 let selectionToolbarDefaultOffMigrationKey = "SelectionToolbarDefaultOffMigrationDone"
 
 func defaultScreenshotDirectoryURL() -> URL {

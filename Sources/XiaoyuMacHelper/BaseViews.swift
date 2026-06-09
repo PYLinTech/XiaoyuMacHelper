@@ -1,11 +1,4 @@
 import AppKit
-@preconcurrency import ApplicationServices
-import Carbon
-import Darwin
-import IOKit
-import IOKit.hidsystem
-import ScreenCaptureKit
-import ServiceManagement
 
 @MainActor
 final class ClickableView: NSView {

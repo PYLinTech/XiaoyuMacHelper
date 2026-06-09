@@ -44,6 +44,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>26.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSCameraUsageDescription</key>
+  <string>主动视觉感知将在您息屏前使用摄像头进行本地分析，不会存储任何您的信息。</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>

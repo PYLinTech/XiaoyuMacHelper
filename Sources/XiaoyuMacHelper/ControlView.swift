@@ -1,11 +1,4 @@
 import AppKit
-@preconcurrency import ApplicationServices
-import Carbon
-import Darwin
-import IOKit
-import IOKit.hidsystem
-import ScreenCaptureKit
-import ServiceManagement
 
 @MainActor
 final class ControlView: NSView, NSTextFieldDelegate {
@@ -13,6 +6,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         case modules
         case capsLockSettings
         case selectionToolbarSettings
+        case activeVisionSettings
         case searchSettings
         case screenshotSettings
     }
@@ -45,9 +39,11 @@ final class ControlView: NSView, NSTextFieldDelegate {
     private let accessibilityCheckbox = NSButton(checkboxWithTitle: "开启辅助功能", target: nil, action: nil)
     private let capsLockCheckbox = NSButton(checkboxWithTitle: "大写指示器", target: nil, action: nil)
     private let selectionToolbarCheckbox = NSButton(checkboxWithTitle: "选区工具栏", target: nil, action: nil)
+    private let activeVisionCheckbox = NSButton(checkboxWithTitle: "主动视觉感知", target: nil, action: nil)
     private let clickToDisableCheckbox = NSButton(checkboxWithTitle: "点击指示器取消大写", target: nil, action: nil)
     private let capsLockSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let selectionToolbarSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
+    private let activeVisionSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let backButton = IconButtonView(systemSymbolName: "chevron.left", accessibilityDescription: "返回", backgroundStyle: .glass)
     private let loginItemButton = NSButton(title: "前往设置启动项", target: nil, action: nil)
     private let accessibilityButton = NSButton(title: "前往设置辅助功能", target: nil, action: nil)
@@ -63,16 +59,23 @@ final class ControlView: NSView, NSTextFieldDelegate {
     private let screenshotSaveButton = NSButton(title: "", target: nil, action: nil)
     private let screenshotCopyCheckbox = NSButton(checkboxWithTitle: "截图后复制到剪贴板", target: nil, action: nil)
     private let screenshotRegionCheckbox = NSButton(checkboxWithTitle: "截图时框选区域", target: nil, action: nil)
+    private let activeVisionGazeCheckbox = NSButton(checkboxWithTitle: "注视屏幕时不要息屏", target: nil, action: nil)
+    private let activeVisionFacingCheckbox = NSButton(checkboxWithTitle: "面向屏幕时不要息屏", target: nil, action: nil)
+    private let activeVisionNotifyCheckbox = NSButton(checkboxWithTitle: "延迟息屏时通知", target: nil, action: nil)
 
     var onCapsLockIndicatorChanged: ((Bool) -> Void)?
     var onClickToDisableChanged: ((Bool) -> Void)?
     var onSelectionToolbarChanged: ((Bool) -> Void)?
+    var onActiveVisionChanged: ((Bool) -> Void)?
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
     var onSelectionToolbarActionMoved: ((ToolbarAction, Int) -> Void)?
     var onSearchTemplateChanged: ((String) -> Void)?
     var onScreenshotSaveDirectoryChanged: ((String) -> Void)?
     var onScreenshotCopiesToClipboardChanged: ((Bool) -> Void)?
     var onScreenshotSelectsRegionChanged: ((Bool) -> Void)?
+    var onActiveVisionGazeChanged: ((Bool) -> Void)?
+    var onActiveVisionFacingChanged: ((Bool) -> Void)?
+    var onActiveVisionNotifyChanged: ((Bool) -> Void)?
     var onLoginItemChanged: ((Bool) -> Void)?
     var onLoginItemGuide: (() -> Void)?
     var onAccessibilityEnableRequested: (() -> Void)?
@@ -98,6 +101,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         accessibilityCheckbox.state = isAccessibilityEnabled ? .on : .off
         capsLockCheckbox.state = settings.isCapsLockIndicatorEnabled ? .on : .off
         selectionToolbarCheckbox.state = settings.isSelectionToolbarEnabled ? .on : .off
+        activeVisionCheckbox.state = settings.isActiveVisionEnabled ? .on : .off
         clickToDisableCheckbox.state = settings.isClickToDisableEnabled ? .on : .off
         copyRow.setEnabled(settings.isSelectionToolbarCopyEnabled)
         pasteRow.setEnabled(settings.isSelectionToolbarPasteEnabled)
@@ -105,6 +109,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         screenshotRow.setEnabled(settings.isSelectionToolbarScreenshotEnabled)
         renderSearchSettings(settings)
         renderScreenshotSettings(settings)
+        renderActiveVisionSettings(settings)
         layoutForCurrentPage()
     }
 
@@ -149,11 +154,13 @@ final class ControlView: NSView, NSTextFieldDelegate {
         accessibilityCheckbox.allowsMixedState = false
         configureCheckbox(capsLockCheckbox, size: 14, weight: .medium, action: #selector(capsLockCheckboxChanged))
         configureCheckbox(selectionToolbarCheckbox, size: 14, weight: .medium, action: #selector(selectionToolbarCheckboxChanged))
+        configureCheckbox(activeVisionCheckbox, size: 14, weight: .medium, action: #selector(activeVisionCheckboxChanged))
         configureCheckbox(clickToDisableCheckbox, size: 14, weight: .regular, action: #selector(clickToDisableCheckboxChanged))
 
-        [capsLockSettingsButton, selectionToolbarSettingsButton, backButton].forEach { addSubview($0) }
+        [capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, backButton].forEach { addSubview($0) }
         capsLockSettingsButton.onClick = { [weak self] in self?.showCapsLockSettingsPage() }
         selectionToolbarSettingsButton.onClick = { [weak self] in self?.showSelectionToolbarSettingsPage() }
+        activeVisionSettingsButton.onClick = { [weak self] in self?.showActiveVisionSettingsPage() }
         backButton.onClick = { [weak self] in self?.backButtonClicked() }
 
         [loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton].forEach {
@@ -213,6 +220,9 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
         configureCheckbox(screenshotCopyCheckbox, size: 13, weight: .regular, action: #selector(screenshotCopyCheckboxChanged))
         configureCheckbox(screenshotRegionCheckbox, size: 13, weight: .regular, action: #selector(screenshotRegionCheckboxChanged))
+        configureCheckbox(activeVisionGazeCheckbox, size: 13, weight: .regular, action: #selector(activeVisionGazeCheckboxChanged))
+        configureCheckbox(activeVisionFacingCheckbox, size: 13, weight: .regular, action: #selector(activeVisionFacingCheckboxChanged))
+        configureCheckbox(activeVisionNotifyCheckbox, size: 13, weight: .regular, action: #selector(activeVisionNotifyCheckboxChanged))
 
         showModulesPage()
     }
@@ -244,6 +254,10 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
     @objc private func selectionToolbarCheckboxChanged() {
         onSelectionToolbarChanged?(selectionToolbarCheckbox.state == .on)
+    }
+
+    @objc private func activeVisionCheckboxChanged() {
+        onActiveVisionChanged?(activeVisionCheckbox.state == .on)
     }
 
     @objc private func loginItemCheckboxChanged() {
@@ -292,6 +306,11 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
     @objc private func showSelectionToolbarSettingsPage() {
         page = .selectionToolbarSettings
+        layoutForCurrentPage()
+    }
+
+    @objc private func showActiveVisionSettingsPage() {
+        page = .activeVisionSettings
         layoutForCurrentPage()
     }
 
@@ -358,6 +377,18 @@ final class ControlView: NSView, NSTextFieldDelegate {
         onScreenshotSelectsRegionChanged?(screenshotRegionCheckbox.state == .on)
     }
 
+    @objc private func activeVisionGazeCheckboxChanged() {
+        onActiveVisionGazeChanged?(activeVisionGazeCheckbox.state == .on)
+    }
+
+    @objc private func activeVisionFacingCheckboxChanged() {
+        onActiveVisionFacingChanged?(activeVisionFacingCheckbox.state == .on)
+    }
+
+    @objc private func activeVisionNotifyCheckboxChanged() {
+        onActiveVisionNotifyChanged?(activeVisionNotifyCheckbox.state == .on)
+    }
+
     private func layoutForCurrentPage() {
         glassContainer.frame = bounds
         glassContentView.frame = bounds
@@ -385,6 +416,8 @@ final class ControlView: NSView, NSTextFieldDelegate {
                     height: Metrics.rowHeight
                 )
             }
+        case .activeVisionSettings:
+            layoutActiveVisionSettingsPage()
         case .searchSettings:
             layoutSearchSettingsPage()
         case .screenshotSettings:
@@ -409,8 +442,8 @@ final class ControlView: NSView, NSTextFieldDelegate {
         hideAllControls()
         show(
             titleLabel, toolOptionsTitle, toolOptionsCard, loginItemCheckbox, accessibilityCheckbox,
-            moduleTitle, moduleCard, capsLockCheckbox, selectionToolbarCheckbox,
-            capsLockSettingsButton, selectionToolbarSettingsButton, loginItemButton, accessibilityButton,
+            moduleTitle, moduleCard, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox,
+            capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, loginItemButton, accessibilityButton,
             clearDataAndQuitButton, quitButton
         )
 
@@ -452,6 +485,13 @@ final class ControlView: NSView, NSTextFieldDelegate {
             checkbox: selectionToolbarCheckbox,
             settingsButton: selectionToolbarSettingsButton,
             rowY: capsRowY - Metrics.rowHeight,
+            cardFrame: moduleCardFrame
+        )
+
+        layoutModuleRow(
+            checkbox: activeVisionCheckbox,
+            settingsButton: activeVisionSettingsButton,
+            rowY: capsRowY - Metrics.rowHeight * 2,
             cardFrame: moduleCardFrame
         )
 
@@ -531,6 +571,20 @@ final class ControlView: NSView, NSTextFieldDelegate {
         layoutCheckbox(screenshotRegionCheckbox, below: screenshotCopyCheckbox.frame, gap: 34, contentX: contentX)
     }
 
+    private func layoutActiveVisionSettingsPage() {
+        layoutSettingsBase(title: "主动视觉感知")
+        show(activeVisionGazeCheckbox, activeVisionFacingCheckbox, activeVisionNotifyCheckbox)
+
+        let contentX = settingsCard.frame.minX + Metrics.sectionInset
+        activeVisionGazeCheckbox.sizeToFit()
+        activeVisionGazeCheckbox.frame.origin = NSPoint(
+            x: contentX,
+            y: settingsCard.frame.maxY - Metrics.sectionInset - activeVisionGazeCheckbox.frame.height
+        )
+        layoutCheckbox(activeVisionFacingCheckbox, below: activeVisionGazeCheckbox.frame, gap: 34, contentX: contentX)
+        layoutCheckbox(activeVisionNotifyCheckbox, below: activeVisionFacingCheckbox.frame, gap: 34, contentX: contentX)
+    }
+
     private func layoutCheckbox(_ checkbox: NSButton, below frame: NSRect, gap: CGFloat, contentX: CGFloat) {
         checkbox.sizeToFit()
         checkbox.frame.origin = NSPoint(x: contentX, y: frame.minY - gap)
@@ -568,11 +622,11 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
     private lazy var allControls: [NSView] = [
         titleLabel, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard,
-        loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, clickToDisableCheckbox,
-        capsLockSettingsButton, selectionToolbarSettingsButton, backButton,
+        loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, clickToDisableCheckbox,
+        capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, backButton,
         loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, copyRow, pasteRow, searchRow, screenshotRow,
         searchEnginePopup, searchTemplateField, screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox,
-        screenshotRegionCheckbox
+        screenshotRegionCheckbox, activeVisionGazeCheckbox, activeVisionFacingCheckbox, activeVisionNotifyCheckbox
     ]
 
     private static func displayName(forDirectoryAt path: String) -> String {
@@ -607,6 +661,12 @@ final class ControlView: NSView, NSTextFieldDelegate {
         screenshotSaveButton.toolTip = settings.screenshotSaveDirectory
         screenshotCopyCheckbox.state = settings.screenshotCopiesToClipboard ? .on : .off
         screenshotRegionCheckbox.state = settings.screenshotSelectsRegion ? .on : .off
+    }
+
+    private func renderActiveVisionSettings(_ settings: AppSettings) {
+        activeVisionGazeCheckbox.state = settings.activeVisionPreventsDisplaySleepOnGaze ? .on : .off
+        activeVisionFacingCheckbox.state = settings.activeVisionPreventsDisplaySleepOnFacing ? .on : .off
+        activeVisionNotifyCheckbox.state = settings.activeVisionNotifiesWhenExtendingDisplaySleep ? .on : .off
     }
 }
 

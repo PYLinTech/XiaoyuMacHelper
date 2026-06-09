@@ -1,11 +1,6 @@
-import AppKit
-@preconcurrency import ApplicationServices
 import Carbon
-import Darwin
-import IOKit
-import IOKit.hidsystem
-import ScreenCaptureKit
-import ServiceManagement
+import CoreGraphics
+import Foundation
 
 enum ToolbarAction: String, Sendable {
     case copy
@@ -74,6 +69,10 @@ struct AppSettings: Equatable, Sendable {
     var screenshotSaveDirectory: String
     var screenshotCopiesToClipboard: Bool
     var screenshotSelectsRegion: Bool
+    var isActiveVisionEnabled: Bool
+    var activeVisionPreventsDisplaySleepOnGaze: Bool
+    var activeVisionPreventsDisplaySleepOnFacing: Bool
+    var activeVisionNotifiesWhenExtendingDisplaySleep: Bool
 
     var visibleSelectionToolbarActions: [ToolbarAction] {
         selectionToolbarOrder.filter(isSelectionToolbarActionEnabled)
@@ -134,7 +133,11 @@ final class SettingsStore {
             searchURLTemplateKey: SearchEnginePreset.defaultTemplate,
             screenshotSaveDirectoryKey: defaultScreenshotDirectoryURL().path,
             screenshotCopiesToClipboardKey: true,
-            screenshotSelectsRegionKey: false
+            screenshotSelectsRegionKey: false,
+            activeVisionEnabledKey: false,
+            activeVisionPreventDisplaySleepOnGazeKey: true,
+            activeVisionPreventDisplaySleepOnFacingKey: true,
+            activeVisionNotifyWhenExtendingDisplaySleepKey: true
         ])
 
         if !defaults.bool(forKey: selectionToolbarDefaultOffMigrationKey) {
@@ -159,7 +162,11 @@ final class SettingsStore {
             searchURLTemplate: defaults.string(forKey: searchURLTemplateKey) ?? SearchEnginePreset.defaultTemplate,
             screenshotSaveDirectory: defaults.string(forKey: screenshotSaveDirectoryKey) ?? defaultScreenshotDirectoryURL().path,
             screenshotCopiesToClipboard: defaults.bool(forKey: screenshotCopiesToClipboardKey),
-            screenshotSelectsRegion: defaults.bool(forKey: screenshotSelectsRegionKey)
+            screenshotSelectsRegion: defaults.bool(forKey: screenshotSelectsRegionKey),
+            isActiveVisionEnabled: defaults.bool(forKey: activeVisionEnabledKey),
+            activeVisionPreventsDisplaySleepOnGaze: defaults.bool(forKey: activeVisionPreventDisplaySleepOnGazeKey),
+            activeVisionPreventsDisplaySleepOnFacing: defaults.bool(forKey: activeVisionPreventDisplaySleepOnFacingKey),
+            activeVisionNotifiesWhenExtendingDisplaySleep: defaults.bool(forKey: activeVisionNotifyWhenExtendingDisplaySleepKey)
         )
     }
 
@@ -197,6 +204,22 @@ final class SettingsStore {
 
     func setScreenshotSelectsRegion(_ isEnabled: Bool) {
         defaults.set(isEnabled, forKey: screenshotSelectsRegionKey)
+    }
+
+    func setActiveVisionEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: activeVisionEnabledKey)
+    }
+
+    func setActiveVisionPreventsDisplaySleepOnGaze(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: activeVisionPreventDisplaySleepOnGazeKey)
+    }
+
+    func setActiveVisionPreventsDisplaySleepOnFacing(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: activeVisionPreventDisplaySleepOnFacingKey)
+    }
+
+    func setActiveVisionNotifiesWhenExtendingDisplaySleep(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: activeVisionNotifyWhenExtendingDisplaySleepKey)
     }
 
     func clearPersistentData() {

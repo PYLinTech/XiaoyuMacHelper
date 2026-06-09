@@ -1,11 +1,7 @@
 import AppKit
-@preconcurrency import ApplicationServices
 import Carbon
-import Darwin
-import IOKit
-import IOKit.hidsystem
+import CoreGraphics
 import ScreenCaptureKit
-import ServiceManagement
 
 @MainActor
 final class SelectionToolbarController {
@@ -16,13 +12,15 @@ final class SelectionToolbarController {
         static let searchReadDelay: TimeInterval = 0.22
     }
 
-    private static let unsupportedSearchPasteboardTypes: [NSPasteboard.PasteboardType] = [
-        NSPasteboard.PasteboardType("public.file-url"),
-        NSPasteboard.PasteboardType("NSFilenamesPboardType"),
-        NSPasteboard.PasteboardType("public.tiff"),
-        NSPasteboard.PasteboardType("public.png"),
-        NSPasteboard.PasteboardType("com.adobe.pdf")
-    ]
+    private static var unsupportedSearchPasteboardTypes: [NSPasteboard.PasteboardType] {
+        [
+            NSPasteboard.PasteboardType("public.file-url"),
+            NSPasteboard.PasteboardType("NSFilenamesPboardType"),
+            NSPasteboard.PasteboardType("public.tiff"),
+            NSPasteboard.PasteboardType("public.png"),
+            NSPasteboard.PasteboardType("com.adobe.pdf")
+        ]
+    }
 
     private let toolbarWindow = SelectionToolbarWindow()
     private let toastWindow = ToastWindow()
