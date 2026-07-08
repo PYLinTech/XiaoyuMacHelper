@@ -172,6 +172,7 @@ final class DesktopLyricsLineView: NSView {
     private var activeDisplayLink: CADisplayLink?
     private var displayLinkTarget: DesktopLyricsDisplayLinkTarget?
     private var cachedPlan: TimedScrollPlan?
+    private var timedOffsetMemory: (identity: TimeInterval?, maxOffset: CGFloat, offset: CGFloat)?
     private var untimedState = UntimedState()
     private var untimedPausedAt: CFTimeInterval?
 
@@ -308,6 +309,7 @@ final class DesktopLyricsLineView: NSView {
                 timing.elapsedAtSync = normalizedElapsed
                 timing.syncedAt = now
                 timing.rate = 1.0
+                timedOffsetMemory = nil
                 invalidateScrollPlan()
             } else {
                 // Never correct ordinary polling drift by moving the offset immediately. Keep the
@@ -509,6 +511,7 @@ final class DesktopLyricsLineView: NSView {
     private func resetLineState(keepsTiming: Bool) {
         untimedState = UntimedState(phase: .headHold, phaseStartedAt: CACurrentMediaTime(), resetSwapped: false, offset: 0, alpha: 1)
         cachedPlan = nil
+        timedOffsetMemory = nil
         if !keepsTiming {
             timing = LineTiming(identity: nil, duration: nil, previousDuration: nil, nextDuration: nil, elapsedAtSync: 0, syncedAt: CACurrentMediaTime(), rate: 1.0)
             timingIsFresh = false
@@ -723,16 +726,41 @@ final class DesktopLyricsLineView: NSView {
 
     private func timedOffset(at timestamp: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
         let elapsed = timing.elapsed(at: timestamp, isPaused: timingIsPaused)
+        let rawOffset: CGFloat
         if elapsed <= plan.startDelay {
             // Keep the head hold truly still; the non-linear curve itself handles the soft start.
             let warmup = clamp(elapsed / max(0.001, plan.startDelay), 0, 1)
-            return plan.leadInOffset * CGFloat(easeOutCubic(warmup))
+            rawOffset = plan.leadInOffset * CGFloat(easeOutCubic(warmup))
+        } else if elapsed >= plan.travelEnd {
+            rawOffset = plan.targetOffset
+        } else {
+            let progress = clamp((elapsed - plan.startDelay) / max(0.001, plan.travelDuration), 0, 1)
+            let curve = CGFloat(readableMotionCurve(progress, rampFraction: plan.rampFraction))
+            let remainingDistance = max(0, plan.targetOffset - plan.leadInOffset)
+            rawOffset = plan.leadInOffset + remainingDistance * curve
         }
-        if elapsed >= plan.travelEnd { return plan.targetOffset }
-        let progress = clamp((elapsed - plan.startDelay) / max(0.001, plan.travelDuration), 0, 1)
-        let curve = CGFloat(readableMotionCurve(progress, rampFraction: plan.rampFraction))
-        let remainingDistance = max(0, plan.targetOffset - plan.leadInOffset)
-        return plan.leadInOffset + remainingDistance * curve
+        return continuousTimedOffset(rawOffset, maxOffset: plan.targetOffset)
+    }
+
+    private func continuousTimedOffset(_ rawOffset: CGFloat, maxOffset: CGFloat) -> CGFloat {
+        let clampedOffset = min(max(0, rawOffset), maxOffset)
+        guard !timingIsPaused else {
+            timedOffsetMemory = (timing.identity, maxOffset, clampedOffset)
+            return clampedOffset
+        }
+
+        if let memory = timedOffsetMemory {
+            let sameIdentity = !didLineIdentityChange(from: memory.identity, to: timing.identity)
+            let sameDistance = abs(memory.maxOffset - maxOffset) <= 2.0
+            if sameIdentity && sameDistance {
+                let stabilized = max(memory.offset, clampedOffset)
+                timedOffsetMemory = (timing.identity, maxOffset, stabilized)
+                return stabilized
+            }
+        }
+
+        timedOffsetMemory = (timing.identity, maxOffset, clampedOffset)
+        return clampedOffset
     }
 
     private func untimedSample(at timestamp: CFTimeInterval, maxOffset: CGFloat) -> (offset: CGFloat, alpha: CGFloat) {

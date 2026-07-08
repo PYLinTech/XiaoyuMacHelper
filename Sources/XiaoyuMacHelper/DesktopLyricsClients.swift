@@ -32,11 +32,14 @@ final class DesktopLyricsSearchService: @unchecked Sendable {
 
     func searchLyrics(for track: DesktopLyricsTrack) async -> DesktopLyricsSearchResult? {
         for provider in providers {
+            guard !Task.isCancelled else { return nil }
             do {
                 let lines = try await provider.lyrics(for: track)
+                guard !Task.isCancelled else { return nil }
                 guard !lines.isEmpty else { continue }
                 return DesktopLyricsSearchResult(providerName: provider.name, lines: lines)
             } catch {
+                guard !Task.isCancelled else { return nil }
                 continue
             }
         }
@@ -98,7 +101,9 @@ enum LyricsNetwork {
     }
 
     private static func data(for request: URLRequest) async throws -> Data {
+        try Task.checkCancellation()
         let (data, response) = try await URLSession.shared.data(for: request)
+        try Task.checkCancellation()
         guard let httpResponse = response as? HTTPURLResponse,
               (200..<300).contains(httpResponse.statusCode) else {
             throw URLError(.badServerResponse)
@@ -182,25 +187,16 @@ private final class QQMusicLyricsProvider: DesktopLyricsProvider, @unchecked Sen
     }
 
     private func bestMatch(in songs: [[String: Any]], track: DesktopLyricsTrack) -> [String: Any]? {
-        let normalizedTitle = normalize(track.title)
-        let normalizedArtist = normalize(track.artist)
-
-        return songs.max { lhs, rhs in
-            score(song: lhs, title: normalizedTitle, artist: normalizedArtist) < score(song: rhs, title: normalizedTitle, artist: normalizedArtist)
+        scoredBestMatch(in: songs, track: track) { song in
+            let singers = (song["singer"] as? [[String: Any]] ?? [])
+                .compactMap { $0["name"] as? String }
+                .joined(separator: " ")
+            return LyricsCandidateInfo(
+                title: (song["title"] as? String) ?? (song["name"] as? String) ?? "",
+                artist: singers,
+                duration: qqSongDuration(from: song)
+            )
         }
-    }
-
-    private func score(song: [String: Any], title: String, artist: String) -> Int {
-        let songTitle = normalize((song["title"] as? String) ?? (song["name"] as? String) ?? "")
-        let singers = (song["singer"] as? [[String: Any]] ?? [])
-            .compactMap { $0["name"] as? String }
-            .joined(separator: " ")
-        let songArtist = normalize(singers)
-        var result = 0
-        if !title.isEmpty, songTitle == title { result += 8 }
-        if !title.isEmpty, songTitle.contains(title) || title.contains(songTitle) { result += 4 }
-        if !artist.isEmpty, songArtist.contains(artist) || artist.contains(songArtist) { result += 3 }
-        return result
     }
 
     private func stripJSONP(_ text: String, callback: String) -> String {
@@ -268,24 +264,16 @@ private final class NeteaseLyricsProvider: DesktopLyricsProvider, @unchecked Sen
     }
 
     private func bestMatch(in songs: [[String: Any]], track: DesktopLyricsTrack) -> [String: Any]? {
-        let normalizedTitle = normalize(track.title)
-        let normalizedArtist = normalize(track.artist)
-        return songs.max { lhs, rhs in
-            score(song: lhs, title: normalizedTitle, artist: normalizedArtist) < score(song: rhs, title: normalizedTitle, artist: normalizedArtist)
+        scoredBestMatch(in: songs, track: track) { song in
+            let artists = (song["artists"] as? [[String: Any]] ?? [])
+                .compactMap { $0["name"] as? String }
+                .joined(separator: " ")
+            return LyricsCandidateInfo(
+                title: song["name"] as? String ?? "",
+                artist: artists,
+                duration: neteaseSongDuration(from: song)
+            )
         }
-    }
-
-    private func score(song: [String: Any], title: String, artist: String) -> Int {
-        let songTitle = normalize(song["name"] as? String ?? "")
-        let artists = (song["artists"] as? [[String: Any]] ?? [])
-            .compactMap { $0["name"] as? String }
-            .joined(separator: " ")
-        let songArtist = normalize(artists)
-        var result = 0
-        if !title.isEmpty, songTitle == title { result += 8 }
-        if !title.isEmpty, songTitle.contains(title) || title.contains(songTitle) { result += 4 }
-        if !artist.isEmpty, songArtist.contains(artist) || artist.contains(songArtist) { result += 3 }
-        return result
     }
 }
 
@@ -528,22 +516,14 @@ private final class AppleMusicLyricsProvider: DesktopLyricsProvider, @unchecked 
     }
 
     private func bestMatch(in songs: [[String: Any]], track: DesktopLyricsTrack) -> [String: Any]? {
-        let normalizedTitle = normalize(track.title)
-        let normalizedArtist = normalize(track.artist)
-        return songs.max { lhs, rhs in
-            score(song: lhs, title: normalizedTitle, artist: normalizedArtist) < score(song: rhs, title: normalizedTitle, artist: normalizedArtist)
+        scoredBestMatch(in: songs, track: track) { song in
+            let attributes = song["attributes"] as? [String: Any]
+            return LyricsCandidateInfo(
+                title: attributes?["name"] as? String ?? "",
+                artist: attributes?["artistName"] as? String ?? "",
+                duration: appleMusicSongDuration(from: attributes)
+            )
         }
-    }
-
-    private func score(song: [String: Any], title: String, artist: String) -> Int {
-        let attributes = song["attributes"] as? [String: Any]
-        let songTitle = normalize(attributes?["name"] as? String ?? "")
-        let songArtist = normalize(attributes?["artistName"] as? String ?? "")
-        var result = 0
-        if !title.isEmpty, songTitle == title { result += 8 }
-        if !title.isEmpty, songTitle.contains(title) || title.contains(songTitle) { result += 4 }
-        if !artist.isEmpty, songArtist.contains(artist) || artist.contains(songArtist) { result += 3 }
-        return result
     }
 
     private func matchFirst(pattern: String, in text: String) -> String? {
@@ -555,6 +535,130 @@ private final class AppleMusicLyricsProvider: DesktopLyricsProvider, @unchecked 
         }
         return String(text[matchRange])
     }
+}
+
+private struct LyricsCandidateInfo {
+    let title: String
+    let artist: String
+    let duration: TimeInterval?
+}
+
+private func scoredBestMatch(
+    in songs: [[String: Any]],
+    track: DesktopLyricsTrack,
+    candidateInfo: ([String: Any]) -> LyricsCandidateInfo
+) -> [String: Any]? {
+    let scored = songs.map { song -> (song: [String: Any], score: Int) in
+        let info = candidateInfo(song)
+        return (song, lyricsMatchScore(candidate: info, track: track))
+    }
+    guard let best = scored.max(by: { $0.score < $1.score }) else { return nil }
+
+    // Avoid accepting a random first result when the search API returns weak or unrelated matches.
+    // A candidate must at least match the title, or title+duration reasonably well when artist info is missing.
+    let minimumScore = track.artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 42 : 58
+    return best.score >= minimumScore ? best.song : nil
+}
+
+private func lyricsMatchScore(candidate: LyricsCandidateInfo, track: DesktopLyricsTrack) -> Int {
+    let trackTitle = normalize(track.title)
+    let candidateTitle = normalize(candidate.title)
+    let relaxedTrackTitle = normalizeRelaxedTitle(track.title)
+    let relaxedCandidateTitle = normalizeRelaxedTitle(candidate.title)
+    let trackArtist = normalize(track.artist)
+    let candidateArtist = normalize(candidate.artist)
+
+    var score = 0
+
+    if !trackTitle.isEmpty, candidateTitle == trackTitle {
+        score += 72
+    } else if !relaxedTrackTitle.isEmpty, relaxedCandidateTitle == relaxedTrackTitle {
+        score += 62
+    } else if !trackTitle.isEmpty, !candidateTitle.isEmpty,
+              candidateTitle.contains(trackTitle) || trackTitle.contains(candidateTitle) {
+        score += 44
+    } else if !relaxedTrackTitle.isEmpty, !relaxedCandidateTitle.isEmpty,
+              relaxedCandidateTitle.contains(relaxedTrackTitle) || relaxedTrackTitle.contains(relaxedCandidateTitle) {
+        score += 36
+    }
+
+    if !trackArtist.isEmpty, candidateArtist == trackArtist {
+        score += 30
+    } else if !trackArtist.isEmpty, !candidateArtist.isEmpty,
+              candidateArtist.contains(trackArtist) || trackArtist.contains(candidateArtist) {
+        score += 20
+    }
+
+    score += durationMatchScore(candidateDuration: candidate.duration, trackDuration: track.duration)
+    return score
+}
+
+private func durationMatchScore(candidateDuration: TimeInterval?, trackDuration: TimeInterval?) -> Int {
+    guard let candidateDuration = validDuration(candidateDuration),
+          let trackDuration = validDuration(trackDuration) else {
+        return 0
+    }
+
+    let diff = abs(candidateDuration - trackDuration)
+    let tightTolerance = max(2.5, trackDuration * 0.025)
+    let normalTolerance = max(5.0, trackDuration * 0.055)
+    let looseTolerance = max(8.0, trackDuration * 0.09)
+    let severeTolerance = max(12.0, trackDuration * 0.14)
+
+    if diff <= tightTolerance { return 24 }
+    if diff <= normalTolerance { return 18 }
+    if diff <= looseTolerance { return 10 }
+    if diff <= severeTolerance { return -12 }
+    return -42
+}
+
+private func qqSongDuration(from song: [String: Any]) -> TimeInterval? {
+    if let value = timeIntervalValue(song["interval"]) { return value }
+    if let value = timeIntervalValue(song["duration"]) { return value }
+    return nil
+}
+
+private func neteaseSongDuration(from song: [String: Any]) -> TimeInterval? {
+    if let value = timeIntervalValue(song["duration"]) { return value > 1000 ? value / 1000 : value }
+    if let value = timeIntervalValue(song["dt"]) { return value > 1000 ? value / 1000 : value }
+    return nil
+}
+
+private func appleMusicSongDuration(from attributes: [String: Any]?) -> TimeInterval? {
+    guard let attributes else { return nil }
+    if let value = timeIntervalValue(attributes["durationInMillis"]) { return value / 1000 }
+    if let value = timeIntervalValue(attributes["durationMillis"]) { return value / 1000 }
+    return nil
+}
+
+private func timeIntervalValue(_ value: Any?) -> TimeInterval? {
+    switch value {
+    case let value as TimeInterval:
+        return value.isFinite ? value : nil
+    case let value as NSNumber:
+        let doubleValue = value.doubleValue
+        return doubleValue.isFinite ? doubleValue : nil
+    case let value as String:
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let doubleValue = Double(trimmed), doubleValue.isFinite else { return nil }
+        return doubleValue
+    default:
+        return nil
+    }
+}
+
+private func validDuration(_ value: TimeInterval?) -> TimeInterval? {
+    guard let value, value.isFinite, value > 20 else { return nil }
+    return value
+}
+
+private func normalizeRelaxedTitle(_ value: String) -> String {
+    let trimmed = value
+        .replacingOccurrences(of: #"\([^\)]*\)"#, with: "", options: .regularExpression)
+        .replacingOccurrences(of: #"\[[^\]]*\]"#, with: "", options: .regularExpression)
+        .replacingOccurrences(of: #"(?i)\b(feat\.?|ft\.?|remaster(?:ed)?|live|version|版|现场|伴奏|纯音乐)\b.*$"#, with: "", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? normalize(value) : normalize(trimmed)
 }
 
 private func normalize(_ value: String) -> String {

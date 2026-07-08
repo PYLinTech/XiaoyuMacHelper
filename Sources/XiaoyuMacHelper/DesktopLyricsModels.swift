@@ -25,7 +25,11 @@ struct DesktopLyricsTrack: Equatable, Sendable {
     }
 
     var cacheKey: String {
-        [title, artist, album]
+        let durationPart = duration.flatMap { value -> String? in
+            guard value.isFinite, value > 0 else { return nil }
+            return String(Int(value.rounded()))
+        } ?? ""
+        return [title, artist, album, durationPart]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .joined(separator: "|")
     }
@@ -48,6 +52,7 @@ struct DesktopLyricLine: Equatable, Sendable {
 }
 
 struct DesktopLyricLineContext: Equatable, Sendable {
+    let index: Int
     let line: DesktopLyricLine
     let duration: TimeInterval?
     let elapsedInLine: TimeInterval
@@ -155,44 +160,56 @@ enum DesktopLyricsParser {
         at elapsedTime: TimeInterval,
         trackDuration: TimeInterval?
     ) -> DesktopLyricLineContext? {
+        guard let index = lineIndex(in: lines, at: elapsedTime) else { return nil }
+        return lineContext(in: lines, index: index, at: elapsedTime, trackDuration: trackDuration)
+    }
+
+    static func lineIndex(in lines: [DesktopLyricLine], at elapsedTime: TimeInterval) -> Int? {
         guard !lines.isEmpty else { return nil }
-        // Keep the visual line close to its real timestamp. A fixed large look-ahead makes fast
-        // songs switch before the previous line has enough time to reveal its tail, so the lead is
-        // shortened for dense timestamp gaps.
-        var baseIndex = 0
-        for index in lines.indices where lines[index].time <= elapsedTime {
-            baseIndex = index
-        }
-        let nextGapForLead: TimeInterval? = baseIndex + 1 < lines.count
-            ? max(0, lines[baseIndex + 1].time - lines[baseIndex].time)
-            : nil
-        let displayLead = nextGapForLead.map { min(0.018, max(0.0015, $0 * 0.006)) } ?? 0.018
-        let displayTime = elapsedTime + displayLead
-        var currentIndex = 0
-        for index in lines.indices where lines[index].time <= displayTime {
-            currentIndex = index
+        let safeTime = elapsedTime.isFinite ? max(0, elapsedTime) : 0
+        var lower = lines.startIndex
+        var upper = lines.endIndex
+
+        while lower < upper {
+            let mid = lower + (upper - lower) / 2
+            if lines[mid].time <= safeTime {
+                lower = mid + 1
+            } else {
+                upper = mid
+            }
         }
 
-        let line = lines[currentIndex]
+        return max(lines.startIndex, lower - 1)
+    }
+
+    static func lineContext(
+        in lines: [DesktopLyricLine],
+        index: Int,
+        at elapsedTime: TimeInterval,
+        trackDuration: TimeInterval?
+    ) -> DesktopLyricLineContext? {
+        guard lines.indices.contains(index) else { return nil }
+
+        let line = lines[index]
         let nextTime: TimeInterval?
-        if currentIndex + 1 < lines.count {
-            nextTime = lines[currentIndex + 1].time
+        if index + 1 < lines.count {
+            nextTime = lines[index + 1].time
         } else {
             nextTime = trackDuration
         }
 
         let rawDuration = nextTime.map { max(0, $0 - line.time) }
         let duration = validLineDuration(rawDuration)
-        let previousDuration = currentIndex > 0
-            ? validLineDuration(max(0, line.time - lines[currentIndex - 1].time))
+        let previousDuration = index > 0
+            ? validLineDuration(max(0, line.time - lines[index - 1].time))
             : nil
 
         let nextDuration: TimeInterval?
-        if currentIndex + 1 < lines.count {
-            let nextLineStart = lines[currentIndex + 1].time
+        if index + 1 < lines.count {
+            let nextLineStart = lines[index + 1].time
             let nextLineEnd: TimeInterval?
-            if currentIndex + 2 < lines.count {
-                nextLineEnd = lines[currentIndex + 2].time
+            if index + 2 < lines.count {
+                nextLineEnd = lines[index + 2].time
             } else {
                 nextLineEnd = trackDuration
             }
@@ -201,8 +218,11 @@ enum DesktopLyricsParser {
             nextDuration = nil
         }
 
-        let elapsedInLine = max(0, elapsedTime - line.time)
+        let safeElapsed = elapsedTime.isFinite ? elapsedTime : line.time
+        let rawElapsed = max(0, safeElapsed - line.time)
+        let elapsedInLine = duration.map { min(rawElapsed, $0) } ?? rawElapsed
         return DesktopLyricLineContext(
+            index: index,
             line: line,
             duration: duration,
             elapsedInLine: elapsedInLine,

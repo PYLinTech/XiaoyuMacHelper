@@ -11,6 +11,7 @@ final class DesktopLyricsController {
         var primary: String
         var translation: String?
         var trackTitle: String
+        var lineIndex: Int?
         var lineStartTime: TimeInterval?
         var lineDuration: TimeInterval?
         var lineElapsed: TimeInterval
@@ -23,7 +24,13 @@ final class DesktopLyricsController {
     private let islandWindow = DynamicIslandLyricsWindow()
     private let menuBarSurface = MenuBarLyricsSurface()
     private var pollTimer: Timer?
-    private var isResolvingLyrics = false
+    private var lyricsResolveTask: Task<Void, Never>?
+    private var lyricsResolveGeneration: UInt64 = 0
+    private var resolvingTrackKey: String?
+    private var isResolvingLyrics: Bool {
+        guard let currentTrackKey else { return false }
+        return resolvingTrackKey == currentTrackKey
+    }
     private var currentTrackKey: String?
     private var currentProviderName: String?
     private var currentLines: [DesktopLyricLine] = []
@@ -32,6 +39,10 @@ final class DesktopLyricsController {
     private var presentationSyncedAt: CFTimeInterval = CACurrentMediaTime()
     private var presentationRate: TimeInterval = 1.0
     private var presentationIsPaused = false
+    private var stableLineTrackKey: String?
+    private var stableLineIndex: Int?
+    private var stableLineLastElapsed: TimeInterval = 0
+    private var stableLineSwitchedAt: CFTimeInterval = CACurrentMediaTime()
     private var lastRenderedLineContext: RenderedLineContext?
     private var pausedRenderedLineContext: RenderedLineContext?
     private var cachedLyrics: [String: DesktopLyricsSearchResult] = [:]
@@ -53,6 +64,7 @@ final class DesktopLyricsController {
 
     func start() {
         guard settings.isDesktopLyricsEnabled else {
+            cancelLyricsResolve()
             resetPresentationState()
             hideAllSurfaces()
             return
@@ -64,6 +76,7 @@ final class DesktopLyricsController {
     func stop() {
         pollTimer?.invalidate()
         pollTimer = nil
+        cancelLyricsResolve()
         resetPresentationState()
         hideAllSurfaces()
     }
@@ -77,6 +90,7 @@ final class DesktopLyricsController {
         menuBarSurface.apply(settings: settings)
         self.settings = settings
         if didTokenChange || didSourceOrderChange || didLanguageChange {
+            cancelLyricsResolve()
             searchService = DesktopLyricsSearchService(settings: settings)
             cachedLyrics.removeAll()
             currentTrackKey = nil
@@ -107,11 +121,13 @@ final class DesktopLyricsController {
 
     private func pollNowPlaying() async {
         guard settings.isDesktopLyricsEnabled else {
+            cancelLyricsResolve()
             resetPresentationState()
             hideAllSurfaces()
             return
         }
         guard let track = await DesktopLyricsNowPlayingProvider.currentTrack() else {
+            cancelLyricsResolve()
             currentTrackKey = nil
             currentProviderName = nil
             currentLines = []
@@ -122,6 +138,7 @@ final class DesktopLyricsController {
 
         guard track.isValidForLyrics,
               isAllowedByWhitelist(appName: track.appName, bundleIdentifier: track.appBundleIdentifier) else {
+            cancelLyricsResolve()
             currentTrackKey = nil
             currentProviderName = nil
             currentLines = []
@@ -136,7 +153,7 @@ final class DesktopLyricsController {
             currentLines = []
             resetPresentationState()
             show(primary: "正在搜索歌词：\(track.displayTitle)", translation: nil, trackTitle: track.displayTitle, islandPrimary: "正在搜索歌词", isPlaying: track.isPlaying)
-            await resolveLyrics(for: track)
+            beginResolveLyrics(for: track)
         }
 
         let isPauseEdge = presentationTrackKey == track.cacheKey && !presentationIsPaused && !track.isPlaying
@@ -161,18 +178,8 @@ final class DesktopLyricsController {
             pausedRenderedLineContext = nil
         }
 
-        if let context = DesktopLyricsParser.currentLineContext(in: currentLines, at: displayElapsedTime, trackDuration: track.duration) {
-            let rendered = RenderedLineContext(
-                trackKey: track.cacheKey,
-                primary: context.line.text,
-                translation: context.line.translation,
-                trackTitle: track.displayTitle,
-                lineStartTime: context.line.time,
-                lineDuration: context.duration,
-                lineElapsed: context.elapsedInLine,
-                previousLineDuration: context.previousDuration,
-                nextLineDuration: context.nextDuration
-            )
+        if let context = stableCurrentLineContext(in: currentLines, at: displayElapsedTime, track: track) {
+            let rendered = renderedLineContext(from: context, track: track)
             lastRenderedLineContext = rendered
             show(rendered: rendered, isPlaying: track.isPlaying)
         } else if isResolvingLyrics {
@@ -269,6 +276,135 @@ final class DesktopLyricsController {
         presentationIsPaused = false
         lastRenderedLineContext = nil
         pausedRenderedLineContext = nil
+        resetStableLineSelection()
+    }
+
+    private func stableCurrentLineContext(
+        in lines: [DesktopLyricLine],
+        at displayElapsedTime: TimeInterval,
+        track: DesktopLyricsTrack
+    ) -> DesktopLyricLineContext? {
+        guard let rawIndex = DesktopLyricsParser.lineIndex(in: lines, at: displayElapsedTime) else {
+            resetStableLineSelection()
+            return nil
+        }
+
+        let now = CACurrentMediaTime()
+        if stableLineTrackKey != track.cacheKey || stableLineIndex == nil {
+            stableLineTrackKey = track.cacheKey
+            stableLineIndex = rawIndex
+            stableLineLastElapsed = displayElapsedTime
+            stableLineSwitchedAt = now
+            return DesktopLyricsParser.lineContext(in: lines, index: rawIndex, at: displayElapsedTime, trackDuration: track.duration)
+        }
+
+        guard var stableIndex = stableLineIndex, lines.indices.contains(stableIndex) else {
+            stableLineIndex = rawIndex
+            stableLineLastElapsed = displayElapsedTime
+            stableLineSwitchedAt = now
+            return DesktopLyricsParser.lineContext(in: lines, index: rawIndex, at: displayElapsedTime, trackDuration: track.duration)
+        }
+
+        let previousElapsed = stableLineLastElapsed
+        let elapsedJump = displayElapsedTime - previousElapsed
+        if isLikelyLyricSeek(
+            rawIndex: rawIndex,
+            stableIndex: stableIndex,
+            elapsedJump: elapsedJump,
+            displayElapsedTime: displayElapsedTime,
+            lines: lines
+        ) {
+            stableLineIndex = rawIndex
+            stableLineLastElapsed = displayElapsedTime
+            stableLineSwitchedAt = now
+            return DesktopLyricsParser.lineContext(in: lines, index: rawIndex, at: displayElapsedTime, trackDuration: track.duration)
+        }
+
+        if rawIndex > stableIndex {
+            while stableIndex + 1 < lines.count {
+                guard now - stableLineSwitchedAt >= 0.055 else { break }
+                let nextStart = lines[stableIndex + 1].time
+                let gap = max(0, nextStart - lines[stableIndex].time)
+                let commitDelay = lineSwitchCommitDelay(previousGap: gap)
+                guard displayElapsedTime >= nextStart + commitDelay else { break }
+                stableIndex += 1
+                stableLineSwitchedAt = now
+                if stableIndex >= rawIndex { break }
+            }
+        } else if rawIndex < stableIndex {
+            let currentStart = lines[stableIndex].time
+            let tolerance = backwardLineBoundaryTolerance(currentGap: stableLineDuration(in: lines, index: stableIndex, trackDuration: track.duration))
+            if displayElapsedTime < currentStart - tolerance {
+                stableIndex = rawIndex
+                stableLineSwitchedAt = now
+            }
+        }
+
+        stableLineIndex = stableIndex
+        stableLineLastElapsed = max(previousElapsed, displayElapsedTime)
+        return DesktopLyricsParser.lineContext(in: lines, index: stableIndex, at: displayElapsedTime, trackDuration: track.duration)
+    }
+
+    private func renderedLineContext(from context: DesktopLyricLineContext, track: DesktopLyricsTrack) -> RenderedLineContext {
+        RenderedLineContext(
+            trackKey: track.cacheKey,
+            primary: context.line.text,
+            translation: context.line.translation,
+            trackTitle: track.displayTitle,
+            lineIndex: context.index,
+            lineStartTime: context.line.time,
+            lineDuration: context.duration,
+            lineElapsed: context.elapsedInLine,
+            previousLineDuration: context.previousDuration,
+            nextLineDuration: context.nextDuration
+        )
+    }
+
+    private func resetStableLineSelection() {
+        stableLineTrackKey = nil
+        stableLineIndex = nil
+        stableLineLastElapsed = 0
+        stableLineSwitchedAt = CACurrentMediaTime()
+    }
+
+    private func isLikelyLyricSeek(
+        rawIndex: Int,
+        stableIndex: Int,
+        elapsedJump: TimeInterval,
+        displayElapsedTime: TimeInterval,
+        lines: [DesktopLyricLine]
+    ) -> Bool {
+        if elapsedJump < -0.85 { return true }
+        if elapsedJump > 3.50 { return true }
+        if abs(rawIndex - stableIndex) >= 3 { return true }
+        if lines.indices.contains(stableIndex), displayElapsedTime + 1.20 < lines[stableIndex].time { return true }
+        return false
+    }
+
+    private func lineSwitchCommitDelay(previousGap: TimeInterval) -> TimeInterval {
+        guard previousGap.isFinite, previousGap > 0 else { return 0.10 }
+        if previousGap >= 12.0 { return 0.24 }
+        if previousGap >= 7.0 { return 0.18 }
+        return min(0.12, max(0.045, previousGap * 0.012))
+    }
+
+    private func backwardLineBoundaryTolerance(currentGap: TimeInterval?) -> TimeInterval {
+        guard let currentGap, currentGap.isFinite, currentGap > 0 else { return 0.32 }
+        if currentGap >= 12.0 { return 0.85 }
+        if currentGap >= 7.0 { return 0.58 }
+        return min(0.38, max(0.20, currentGap * 0.030))
+    }
+
+    private func stableLineDuration(in lines: [DesktopLyricLine], index: Int, trackDuration: TimeInterval?) -> TimeInterval? {
+        guard lines.indices.contains(index) else { return nil }
+        let endTime: TimeInterval?
+        if index + 1 < lines.count {
+            endTime = lines[index + 1].time
+        } else {
+            endTime = trackDuration
+        }
+        guard let endTime, endTime.isFinite else { return nil }
+        return max(0, endTime - lines[index].time)
     }
 
     private func show(rendered context: RenderedLineContext, isPlaying: Bool) {
@@ -375,25 +511,55 @@ final class DesktopLyricsController {
         return false
     }
 
-    private func resolveLyrics(for track: DesktopLyricsTrack) async {
-        guard !isResolvingLyrics else { return }
-        isResolvingLyrics = true
-        defer { isResolvingLyrics = false }
+    private func beginResolveLyrics(for track: DesktopLyricsTrack) {
+        lyricsResolveGeneration &+= 1
+        let generation = lyricsResolveGeneration
+        let trackKey = track.cacheKey
 
-        if let cached = cachedLyrics[track.cacheKey] {
-            currentProviderName = cached.providerName
-            currentLines = cached.lines
+        lyricsResolveTask?.cancel()
+        lyricsResolveTask = nil
+        resolvingTrackKey = nil
+
+        if let cached = cachedLyrics[trackKey] {
+            applyLyricsResult(cached, forTrackKey: trackKey, generation: generation)
             return
         }
 
-        guard let result = await searchService.searchLyrics(for: track) else {
+        resolvingTrackKey = trackKey
+        let searchService = searchService
+        lyricsResolveTask = Task { [weak self, searchService, track, trackKey, generation] in
+            let result = await searchService.searchLyrics(for: track)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                self?.applyLyricsResult(result, forTrackKey: trackKey, generation: generation)
+            }
+        }
+    }
+
+    private func applyLyricsResult(_ result: DesktopLyricsSearchResult?, forTrackKey trackKey: String, generation: UInt64) {
+        guard generation == lyricsResolveGeneration,
+              currentTrackKey == trackKey else {
+            return
+        }
+
+        resolvingTrackKey = nil
+        lyricsResolveTask = nil
+
+        guard let result else {
             currentProviderName = nil
             currentLines = []
             return
         }
 
-        cachedLyrics[track.cacheKey] = result
+        cachedLyrics[trackKey] = result
         currentProviderName = result.providerName
         currentLines = result.lines
+    }
+
+    private func cancelLyricsResolve() {
+        lyricsResolveGeneration &+= 1
+        lyricsResolveTask?.cancel()
+        lyricsResolveTask = nil
+        resolvingTrackKey = nil
     }
 }
