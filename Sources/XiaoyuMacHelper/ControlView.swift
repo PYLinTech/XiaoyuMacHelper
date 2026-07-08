@@ -1,12 +1,18 @@
 import AppKit
 
 @MainActor
-final class ControlView: NSView, NSTextFieldDelegate {
+final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private enum Page {
         case modules
         case capsLockSettings
         case selectionToolbarSettings
         case activeVisionSettings
+        case desktopLyricsSettings
+        case desktopLyricsSurfaceSettings
+        case dynamicIslandLyricsSettings
+        case menuBarLyricsSettings
+        case appleMusicSettings
+        case musicLyricsWhitelistSettings
         case searchSettings
         case screenshotSettings
     }
@@ -19,31 +25,48 @@ final class ControlView: NSView, NSTextFieldDelegate {
         static let sectionInset: CGFloat = 16
         static let footerHeight: CGFloat = 32
         static let cornerRadius: CGFloat = 20
+        static let overlayScrollerSafeGutter: CGFloat = 34
+        static let overlayScrollerRightInset: CGFloat = 12
+        static let overlayScrollerVerticalInset: CGFloat = 20
+    }
+
+    private struct ApplicationChoice: Hashable {
+        let bundleIdentifier: String
+        let displayName: String
+        let path: String
     }
 
     private var page: Page = .modules
     private var selectionToolbarOrder = ToolbarAction.configurableCases
+    private var desktopLyricsSourceOrder = DesktopLyricsSource.defaultOrder
     private var isAccessibilityEnabledForDisplay = false
     private var isSearchTemplateCustom = false
 
     private let glassContainer = NSGlassEffectContainerView()
     private let glassContentView = NSView()
     private let titleLabel = NSTextField(labelWithString: "Xiaoyu MacHelper")
+    private let versionLabel = NSTextField(labelWithString: "")
     private let toolOptionsTitle = NSTextField(labelWithString: "工具选项")
     private let moduleTitle = NSTextField(labelWithString: "功能模块")
     private let settingsTitle = NSTextField(labelWithString: "")
     private let toolOptionsCard = NSGlassEffectView()
     private let moduleCard = NSGlassEffectView()
     private let settingsCard = NSGlassEffectView()
+    private let settingsScrollView = NSScrollView(frame: .zero)
+    private let settingsContentView = NSView(frame: .zero)
+    private var settingsContentHeight: CGFloat = 0
+    private var shouldScrollSettingsContentToTop = false
     private let loginItemCheckbox = NSButton(checkboxWithTitle: "开启自启动", target: nil, action: nil)
     private let accessibilityCheckbox = NSButton(checkboxWithTitle: "开启辅助功能", target: nil, action: nil)
     private let capsLockCheckbox = NSButton(checkboxWithTitle: "大写指示器", target: nil, action: nil)
     private let selectionToolbarCheckbox = NSButton(checkboxWithTitle: "选区工具栏", target: nil, action: nil)
     private let activeVisionCheckbox = NSButton(checkboxWithTitle: "主动视觉感知", target: nil, action: nil)
+    private let desktopLyricsCheckbox = NSButton(checkboxWithTitle: "音乐歌词", target: nil, action: nil)
     private let clickToDisableCheckbox = NSButton(checkboxWithTitle: "点击指示器取消大写", target: nil, action: nil)
     private let capsLockSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let selectionToolbarSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let activeVisionSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
+    private let desktopLyricsSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let backButton = IconButtonView(systemSymbolName: "chevron.left", accessibilityDescription: "返回", backgroundStyle: .glass)
     private let loginItemButton = NSButton(title: "前往设置启动项", target: nil, action: nil)
     private let accessibilityButton = NSButton(title: "前往设置辅助功能", target: nil, action: nil)
@@ -62,13 +85,115 @@ final class ControlView: NSView, NSTextFieldDelegate {
     private let activeVisionGazeCheckbox = NSButton(checkboxWithTitle: "注视屏幕时不要息屏", target: nil, action: nil)
     private let activeVisionFacingCheckbox = NSButton(checkboxWithTitle: "面向屏幕时不要息屏", target: nil, action: nil)
     private let activeVisionNotifyCheckbox = NSButton(checkboxWithTitle: "延迟息屏时通知", target: nil, action: nil)
+    private let desktopLyricsHintLabel = NSTextField(labelWithString: "启用的形态会同步显示；灵动大陆可视化频谱需录音权限；下方歌词源可拖动排序。")
+    private let desktopLyricsLanguageLabel = NSTextField(labelWithString: "首选语言：")
+    private let desktopLyricsLanguagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let desktopLyricsSurfaceCheckbox = NSButton(checkboxWithTitle: "桌面歌词", target: nil, action: nil)
+    private let desktopLyricsSurfaceSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "桌面歌词设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
+    private let desktopLyricsWidthLabel = NSTextField(labelWithString: "桌面歌词宽度：")
+    private let desktopLyricsWidthValueLabel = NSTextField(labelWithString: "")
+    private let desktopLyricsWidthSlider = NSSlider(value: 980, minValue: 260, maxValue: 2200, target: nil, action: nil)
+    private let desktopLyricsAlignmentLabel = NSTextField(labelWithString: "对齐方式：")
+    private let desktopLyricsAlignmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let dynamicIslandLyricsCheckbox = NSButton(checkboxWithTitle: "灵动大陆歌词", target: nil, action: nil)
+    private let dynamicIslandLyricsSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "灵动大陆歌词设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
+    private let dynamicIslandLyricsSpectrumCheckbox = NSButton(checkboxWithTitle: "灵动大陆可视化频谱（需录音权限）", target: nil, action: nil)
+    private let dynamicIslandLyricsHideOnHoverCheckbox = NSButton(checkboxWithTitle: "鼠标移入时隐藏灵动大陆", target: nil, action: nil)
+    private let dynamicIslandLyricsWidthLabel = NSTextField(labelWithString: "灵动大陆总宽度：")
+    private let dynamicIslandLyricsWidthValueLabel = NSTextField(labelWithString: "")
+    private let dynamicIslandLyricsWidthSlider = NSSlider(value: 900, minValue: 360, maxValue: 1700, target: nil, action: nil)
+    private let dynamicIslandLyricsBlankWidthLabel = NSTextField(labelWithString: "刘海避让空白宽度：")
+    private let dynamicIslandLyricsBlankWidthValueLabel = NSTextField(labelWithString: "")
+    private let dynamicIslandLyricsBlankWidthSlider = NSSlider(value: 210, minValue: 60, maxValue: 900, target: nil, action: nil)
+    private let dynamicIslandLyricsHeightLabel = NSTextField(labelWithString: "灵动大陆高度：")
+    private let dynamicIslandLyricsHeightValueLabel = NSTextField(labelWithString: "")
+    private let dynamicIslandLyricsHeightSlider = NSSlider(value: 58, minValue: 32, maxValue: 180, target: nil, action: nil)
+    private let dynamicIslandLyricsSlantRatioLabel = NSTextField(labelWithString: "侧边倾斜程度：")
+    private let dynamicIslandLyricsSlantRatioValueLabel = NSTextField(labelWithString: "")
+    private let dynamicIslandLyricsSlantRatioSlider = NSSlider(value: 55, minValue: 1, maxValue: 100, target: nil, action: nil)
+    private let dynamicIslandLyricsCornerRatioLabel = NSTextField(labelWithString: "圆润程度：")
+    private let dynamicIslandLyricsCornerRatioValueLabel = NSTextField(labelWithString: "")
+    private let dynamicIslandLyricsCornerRatioSlider = NSSlider(value: 55, minValue: 1, maxValue: 100, target: nil, action: nil)
+    private let dynamicIslandLyricsFontLabel = NSTextField(labelWithString: "字体：")
+    private let dynamicIslandLyricsFontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let dynamicIslandLyricsFontSizeLabel = NSTextField(labelWithString: "字体大小：")
+    private let dynamicIslandLyricsFontSizeValueLabel = NSTextField(labelWithString: "")
+    private let dynamicIslandLyricsFontSizeSlider = NSSlider(value: 15, minValue: 11, maxValue: 64, target: nil, action: nil)
+    private let menuBarLyricsCheckbox = NSButton(checkboxWithTitle: "任务栏歌词", target: nil, action: nil)
+    private let menuBarLyricsSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "任务栏歌词设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
+    private let menuBarLyricsWidthLabel = NSTextField(labelWithString: "任务栏歌词宽度：")
+    private let menuBarLyricsWidthValueLabel = NSTextField(labelWithString: "")
+    private let menuBarLyricsWidthSlider = NSSlider(value: 220, minValue: 40, maxValue: 760, target: nil, action: nil)
+    private let menuBarLyricsAlignmentLabel = NSTextField(labelWithString: "对齐方式：")
+    private let menuBarLyricsAlignmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let desktopLyricsTranslationCheckbox = NSButton(checkboxWithTitle: "同时显示翻译和原文", target: nil, action: nil)
+    private let desktopLyricsLockCheckbox = NSButton(checkboxWithTitle: "锁定桌面歌词位置", target: nil, action: nil)
+    private let desktopLyricsStyleLabel = NSTextField(labelWithString: "桌面样式：")
+    private let desktopLyricsStylePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let desktopLyricsFontLabel = NSTextField(labelWithString: "字体：")
+    private let desktopLyricsFontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let desktopLyricsFontSizeLabel = NSTextField(labelWithString: "字体大小：")
+    private let desktopLyricsFontSizeValueLabel = NSTextField(labelWithString: "")
+    private let desktopLyricsFontSizeSlider = NSSlider(value: 28, minValue: 18, maxValue: 48, target: nil, action: nil)
+    private let desktopLyricsTextColorLabel = NSTextField(labelWithString: "文字颜色：")
+    private let desktopLyricsTextColorWell = NSColorWell(frame: .zero)
+    private let desktopLyricsStrokeColorLabel = NSTextField(labelWithString: "描边颜色：")
+    private let desktopLyricsStrokeColorWell = NSColorWell(frame: .zero)
+    private let desktopLyricsStrokeWidthLabel = NSTextField(labelWithString: "描边强度：")
+    private let desktopLyricsStrokeWidthValueLabel = NSTextField(labelWithString: "")
+    private let desktopLyricsStrokeWidthSlider = NSSlider(value: 0.8, minValue: 0, maxValue: 6, target: nil, action: nil)
+    private let musicLyricsWhitelistLabel = NSTextField(labelWithString: "白名单应用：")
+    private let musicLyricsWhitelistButton = NSButton(title: "管理白名单应用", target: nil, action: nil)
+    private let lyricsSourceLabel = NSTextField(labelWithString: "歌词源：")
+    private let whitelistScrollView = NSScrollView(frame: .zero)
+    private let whitelistTableView = WhitelistTableView(frame: .zero)
+    private let whitelistAddButton = IconButtonView(systemSymbolName: "plus", accessibilityDescription: "添加", backgroundStyle: .glass)
+    private let whitelistRemoveButton = IconButtonView(systemSymbolName: "minus", accessibilityDescription: "移除", backgroundStyle: .glass)
+    private var availableApplications: [ApplicationChoice] = []
+    private var whitelistApplications: [ApplicationChoice] = []
+    private var currentWhitelistRawValue = ""
+    private let appleMusicSourceRow = DesktopLyricsSourceRow(source: .appleMusic)
+    private let qqMusicSourceRow = DesktopLyricsSourceRow(source: .qqMusic)
+    private let neteaseSourceRow = DesktopLyricsSourceRow(source: .netease)
+    private let appleMusicTokenStatusLabel = NSTextField(labelWithString: "")
+    private let appleMusicLoginButton = NSButton(title: "登录 Apple Music", target: nil, action: nil)
+    private let appleMusicClearTokenButton = NSButton(title: "清除登录", target: nil, action: nil)
 
     var onCapsLockIndicatorChanged: ((Bool) -> Void)?
     var onClickToDisableChanged: ((Bool) -> Void)?
     var onSelectionToolbarChanged: ((Bool) -> Void)?
     var onActiveVisionChanged: ((Bool) -> Void)?
+    var onDesktopLyricsChanged: ((Bool) -> Void)?
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
     var onSelectionToolbarActionMoved: ((ToolbarAction, Int) -> Void)?
+    var onDesktopLyricsSourceMoved: ((DesktopLyricsSource, Int) -> Void)?
+    var onDesktopLyricsSourceEnabledChanged: ((DesktopLyricsSource, Bool) -> Void)?
+    var onDesktopLyricsPreferredLanguageChanged: ((DesktopLyricsPreferredLanguage) -> Void)?
+    var onDesktopLyricsSurfaceChanged: ((Bool) -> Void)?
+    var onDynamicIslandLyricsChanged: ((Bool) -> Void)?
+    var onDynamicIslandLyricsSpectrumChanged: ((Bool) -> Void)?
+    var onDynamicIslandLyricsHideOnHoverChanged: ((Bool) -> Void)?
+    var onDesktopLyricsWidthChanged: ((Double) -> Void)?
+    var onDesktopLyricsAlignmentChanged: ((LyricsTextAlignment) -> Void)?
+    var onDynamicIslandLyricsWidthChanged: ((Double) -> Void)?
+    var onDynamicIslandLyricsBlankWidthChanged: ((Double) -> Void)?
+    var onDynamicIslandLyricsHeightChanged: ((Double) -> Void)?
+    var onDynamicIslandLyricsSlantRatioChanged: ((Double) -> Void)?
+    var onDynamicIslandLyricsCornerRatioChanged: ((Double) -> Void)?
+    var onDynamicIslandLyricsFontSizeChanged: ((Double) -> Void)?
+    var onDynamicIslandLyricsFontNameChanged: ((String) -> Void)?
+    var onMenuBarLyricsChanged: ((Bool) -> Void)?
+    var onMenuBarLyricsWidthChanged: ((Double) -> Void)?
+    var onMenuBarLyricsAlignmentChanged: ((LyricsTextAlignment) -> Void)?
+    var onDesktopLyricsShowsTranslationChanged: ((Bool) -> Void)?
+    var onDesktopLyricsFontSizeChanged: ((Double) -> Void)?
+    var onDesktopLyricsLockedChanged: ((Bool) -> Void)?
+    var onDesktopLyricsStylePresetChanged: ((DesktopLyricsStylePreset) -> Void)?
+    var onDesktopLyricsFontNameChanged: ((String) -> Void)?
+    var onDesktopLyricsTextColorChanged: ((String) -> Void)?
+    var onDesktopLyricsStrokeColorChanged: ((String) -> Void)?
+    var onDesktopLyricsStrokeWidthChanged: ((Double) -> Void)?
+    var onMusicLyricsAppWhitelistChanged: ((String) -> Void)?
     var onSearchTemplateChanged: ((String) -> Void)?
     var onScreenshotSaveDirectoryChanged: ((String) -> Void)?
     var onScreenshotCopiesToClipboardChanged: ((Bool) -> Void)?
@@ -76,6 +201,8 @@ final class ControlView: NSView, NSTextFieldDelegate {
     var onActiveVisionGazeChanged: ((Bool) -> Void)?
     var onActiveVisionFacingChanged: ((Bool) -> Void)?
     var onActiveVisionNotifyChanged: ((Bool) -> Void)?
+    var onAppleMusicLoginRequested: (() -> Void)?
+    var onAppleMusicTokenCleared: (() -> Void)?
     var onLoginItemChanged: ((Bool) -> Void)?
     var onLoginItemGuide: (() -> Void)?
     var onAccessibilityEnableRequested: (() -> Void)?
@@ -96,12 +223,15 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
     func render(settings: AppSettings, isLoginItemEnabled: Bool, isAccessibilityEnabled: Bool) {
         selectionToolbarOrder = settings.selectionToolbarOrder
+        desktopLyricsSourceOrder = settings.desktopLyricsSourceOrder
+        desktopLyricsLanguagePopup.selectItem(at: DesktopLyricsPreferredLanguage.allCases.firstIndex(of: settings.desktopLyricsPreferredLanguage) ?? 0)
         isAccessibilityEnabledForDisplay = isAccessibilityEnabled
         loginItemCheckbox.state = isLoginItemEnabled ? .on : .off
         accessibilityCheckbox.state = isAccessibilityEnabled ? .on : .off
         capsLockCheckbox.state = settings.isCapsLockIndicatorEnabled ? .on : .off
         selectionToolbarCheckbox.state = settings.isSelectionToolbarEnabled ? .on : .off
         activeVisionCheckbox.state = settings.isActiveVisionEnabled ? .on : .off
+        desktopLyricsCheckbox.state = settings.isDesktopLyricsEnabled ? .on : .off
         clickToDisableCheckbox.state = settings.isClickToDisableEnabled ? .on : .off
         copyRow.setEnabled(settings.isSelectionToolbarCopyEnabled)
         pasteRow.setEnabled(settings.isSelectionToolbarPasteEnabled)
@@ -110,6 +240,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         renderSearchSettings(settings)
         renderScreenshotSettings(settings)
         renderActiveVisionSettings(settings)
+        renderDesktopLyricsSettings(settings)
         layoutForCurrentPage()
     }
 
@@ -126,6 +257,10 @@ final class ControlView: NSView, NSTextFieldDelegate {
         glassContainer.contentView = glassContentView
         addSubview(glassContainer)
 
+        settingsScrollView.documentView = settingsContentView
+        configureSystemScrollView(settingsScrollView)
+        settingsScrollView.verticalScrollElasticity = .automatic
+        addSubview(settingsScrollView)
         [toolOptionsCard, moduleCard, settingsCard].forEach {
             $0.style = .regular
             $0.cornerRadius = Metrics.cornerRadius
@@ -138,6 +273,12 @@ final class ControlView: NSView, NSTextFieldDelegate {
         titleLabel.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
         titleLabel.textColor = .labelColor
         addSubview(titleLabel)
+
+        versionLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        versionLabel.textColor = .tertiaryLabelColor
+        versionLabel.alignment = .left
+        versionLabel.stringValue = Self.appVersionDisplayString()
+        addSubview(versionLabel)
 
         [toolOptionsTitle, moduleTitle].forEach {
             $0.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
@@ -155,12 +296,14 @@ final class ControlView: NSView, NSTextFieldDelegate {
         configureCheckbox(capsLockCheckbox, size: 14, weight: .medium, action: #selector(capsLockCheckboxChanged))
         configureCheckbox(selectionToolbarCheckbox, size: 14, weight: .medium, action: #selector(selectionToolbarCheckboxChanged))
         configureCheckbox(activeVisionCheckbox, size: 14, weight: .medium, action: #selector(activeVisionCheckboxChanged))
-        configureCheckbox(clickToDisableCheckbox, size: 14, weight: .regular, action: #selector(clickToDisableCheckboxChanged))
+        configureCheckbox(desktopLyricsCheckbox, size: 14, weight: .medium, action: #selector(desktopLyricsCheckboxChanged))
+        configureCheckbox(clickToDisableCheckbox, size: 14, weight: .regular, action: #selector(clickToDisableCheckboxChanged), in: settingsContentView)
 
-        [capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, backButton].forEach { addSubview($0) }
+        [capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, backButton].forEach { addSubview($0) }
         capsLockSettingsButton.onClick = { [weak self] in self?.showCapsLockSettingsPage() }
         selectionToolbarSettingsButton.onClick = { [weak self] in self?.showSelectionToolbarSettingsPage() }
         activeVisionSettingsButton.onClick = { [weak self] in self?.showActiveVisionSettingsPage() }
+        desktopLyricsSettingsButton.onClick = { [weak self] in self?.showDesktopLyricsSettingsPage() }
         backButton.onClick = { [weak self] in self?.backButtonClicked() }
 
         [loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton].forEach {
@@ -180,7 +323,16 @@ final class ControlView: NSView, NSTextFieldDelegate {
         [copyRow, pasteRow, searchRow, screenshotRow].forEach { row in
             row.onToggle = { [weak self] action, isEnabled in self?.onSelectionToolbarActionChanged?(action, isEnabled) }
             row.onMove = { [weak self] action, direction in self?.onSelectionToolbarActionMoved?(action, direction) }
-            addSubview(row)
+            settingsContentView.addSubview(row)
+        }
+
+        [appleMusicSourceRow, qqMusicSourceRow, neteaseSourceRow].forEach { row in
+            row.onMove = { [weak self] source, direction in self?.onDesktopLyricsSourceMoved?(source, direction) }
+            row.onToggle = { [weak self] source, isEnabled in self?.onDesktopLyricsSourceEnabledChanged?(source, isEnabled) }
+            row.onSettings = { [weak self] source in
+                if source == .appleMusic { self?.showAppleMusicSettingsPage() }
+            }
+            settingsContentView.addSubview(row)
         }
         searchRow.onSettings = { [weak self] _ in self?.showSearchSettingsPage() }
         screenshotRow.onSettings = { [weak self] _ in self?.showScreenshotSettingsPage() }
@@ -189,7 +341,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
         searchEnginePopup.bezelStyle = .glass
         searchEnginePopup.target = self
         searchEnginePopup.action = #selector(searchEngineSelected)
-        addSubview(searchEnginePopup)
+        settingsContentView.addSubview(searchEnginePopup)
 
         searchTemplateField.cell = VerticallyCenteredTextFieldCell(textCell: "")
         searchTemplateField.font = NSFont.systemFont(ofSize: 13, weight: .regular)
@@ -205,33 +357,181 @@ final class ControlView: NSView, NSTextFieldDelegate {
         searchTemplateField.delegate = self
         searchTemplateField.target = self
         searchTemplateField.action = #selector(searchTemplateCommitted)
-        addSubview(searchTemplateField)
+        settingsContentView.addSubview(searchTemplateField)
 
         screenshotSaveLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         screenshotSaveLabel.textColor = .labelColor
-        addSubview(screenshotSaveLabel)
+        settingsContentView.addSubview(screenshotSaveLabel)
 
         screenshotSaveButton.bezelStyle = .glass
         screenshotSaveButton.alignment = .left
         screenshotSaveButton.font = NSFont.systemFont(ofSize: 13, weight: .regular)
         screenshotSaveButton.target = self
         screenshotSaveButton.action = #selector(screenshotSaveDirectoryClicked)
-        addSubview(screenshotSaveButton)
+        settingsContentView.addSubview(screenshotSaveButton)
 
-        configureCheckbox(screenshotCopyCheckbox, size: 13, weight: .regular, action: #selector(screenshotCopyCheckboxChanged))
-        configureCheckbox(screenshotRegionCheckbox, size: 13, weight: .regular, action: #selector(screenshotRegionCheckboxChanged))
-        configureCheckbox(activeVisionGazeCheckbox, size: 13, weight: .regular, action: #selector(activeVisionGazeCheckboxChanged))
-        configureCheckbox(activeVisionFacingCheckbox, size: 13, weight: .regular, action: #selector(activeVisionFacingCheckboxChanged))
-        configureCheckbox(activeVisionNotifyCheckbox, size: 13, weight: .regular, action: #selector(activeVisionNotifyCheckboxChanged))
+        configureCheckbox(screenshotCopyCheckbox, size: 13, weight: .regular, action: #selector(screenshotCopyCheckboxChanged), in: settingsContentView)
+        configureCheckbox(screenshotRegionCheckbox, size: 13, weight: .regular, action: #selector(screenshotRegionCheckboxChanged), in: settingsContentView)
+        configureCheckbox(activeVisionGazeCheckbox, size: 13, weight: .regular, action: #selector(activeVisionGazeCheckboxChanged), in: settingsContentView)
+        configureCheckbox(activeVisionFacingCheckbox, size: 13, weight: .regular, action: #selector(activeVisionFacingCheckboxChanged), in: settingsContentView)
+        configureCheckbox(activeVisionNotifyCheckbox, size: 13, weight: .regular, action: #selector(activeVisionNotifyCheckboxChanged), in: settingsContentView)
+        configureCheckbox(desktopLyricsSurfaceCheckbox, size: 13, weight: .regular, action: #selector(desktopLyricsSurfaceCheckboxChanged), in: settingsContentView)
+        configureCheckbox(dynamicIslandLyricsCheckbox, size: 13, weight: .regular, action: #selector(dynamicIslandLyricsCheckboxChanged), in: settingsContentView)
+        configureCheckbox(dynamicIslandLyricsSpectrumCheckbox, size: 13, weight: .regular, action: #selector(dynamicIslandLyricsSpectrumCheckboxChanged), in: settingsContentView)
+        configureCheckbox(dynamicIslandLyricsHideOnHoverCheckbox, size: 13, weight: .regular, action: #selector(dynamicIslandLyricsHideOnHoverCheckboxChanged), in: settingsContentView)
+        configureCheckbox(menuBarLyricsCheckbox, size: 13, weight: .regular, action: #selector(menuBarLyricsCheckboxChanged), in: settingsContentView)
+        [desktopLyricsSurfaceSettingsButton, dynamicIslandLyricsSettingsButton, menuBarLyricsSettingsButton].forEach { settingsContentView.addSubview($0) }
+        desktopLyricsSurfaceSettingsButton.onClick = { [weak self] in self?.showDesktopLyricsSurfaceSettingsPage() }
+        dynamicIslandLyricsSettingsButton.onClick = { [weak self] in self?.showDynamicIslandLyricsSettingsPage() }
+        menuBarLyricsSettingsButton.onClick = { [weak self] in self?.showMenuBarLyricsSettingsPage() }
+        configureCheckbox(desktopLyricsTranslationCheckbox, size: 13, weight: .regular, action: #selector(desktopLyricsTranslationCheckboxChanged), in: settingsContentView)
+        configureCheckbox(desktopLyricsLockCheckbox, size: 13, weight: .regular, action: #selector(desktopLyricsLockCheckboxChanged), in: settingsContentView)
+
+        [desktopLyricsHintLabel, appleMusicTokenStatusLabel].forEach { label in
+            label.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byWordWrapping
+            label.maximumNumberOfLines = 0
+            settingsContentView.addSubview(label)
+        }
+        desktopLyricsLanguageLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        desktopLyricsLanguageLabel.textColor = .labelColor
+        settingsContentView.addSubview(desktopLyricsLanguageLabel)
+        desktopLyricsLanguagePopup.addItems(withTitles: DesktopLyricsPreferredLanguage.allCases.map(\.title))
+        desktopLyricsLanguagePopup.bezelStyle = .glass
+        desktopLyricsLanguagePopup.target = self
+        desktopLyricsLanguagePopup.action = #selector(desktopLyricsLanguageSelected)
+        settingsContentView.addSubview(desktopLyricsLanguagePopup)
+
+        [desktopLyricsAlignmentPopup, menuBarLyricsAlignmentPopup].forEach { popup in
+            popup.addItems(withTitles: LyricsTextAlignment.allCases.map(\.title))
+            popup.bezelStyle = .glass
+            settingsContentView.addSubview(popup)
+        }
+        desktopLyricsAlignmentPopup.target = self
+        desktopLyricsAlignmentPopup.action = #selector(desktopLyricsAlignmentSelected)
+        menuBarLyricsAlignmentPopup.target = self
+        menuBarLyricsAlignmentPopup.action = #selector(menuBarLyricsAlignmentSelected)
+        [desktopLyricsStyleLabel, desktopLyricsFontLabel, desktopLyricsFontSizeLabel, desktopLyricsFontSizeValueLabel, desktopLyricsTextColorLabel, desktopLyricsStrokeColorLabel, desktopLyricsStrokeWidthLabel, desktopLyricsStrokeWidthValueLabel, desktopLyricsWidthLabel, desktopLyricsWidthValueLabel, desktopLyricsAlignmentLabel, dynamicIslandLyricsWidthLabel, dynamicIslandLyricsWidthValueLabel, dynamicIslandLyricsBlankWidthLabel, dynamicIslandLyricsBlankWidthValueLabel, dynamicIslandLyricsHeightLabel, dynamicIslandLyricsHeightValueLabel, dynamicIslandLyricsSlantRatioLabel, dynamicIslandLyricsSlantRatioValueLabel, dynamicIslandLyricsCornerRatioLabel, dynamicIslandLyricsCornerRatioValueLabel, dynamicIslandLyricsFontLabel, dynamicIslandLyricsFontSizeLabel, dynamicIslandLyricsFontSizeValueLabel, menuBarLyricsWidthLabel, menuBarLyricsWidthValueLabel, menuBarLyricsAlignmentLabel, musicLyricsWhitelistLabel, lyricsSourceLabel].forEach { label in
+            label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+            label.textColor = .labelColor
+            settingsContentView.addSubview(label)
+        }
+        desktopLyricsStylePopup.addItems(withTitles: DesktopLyricsStylePreset.allCases.map(\.title))
+        desktopLyricsStylePopup.bezelStyle = .glass
+        desktopLyricsStylePopup.target = self
+        desktopLyricsStylePopup.action = #selector(desktopLyricsStyleSelected)
+        settingsContentView.addSubview(desktopLyricsStylePopup)
+        let availableFontFamilies = NSFontManager.shared.availableFontFamilies.sorted()
+        desktopLyricsFontPopup.addItem(withTitle: "系统默认")
+        desktopLyricsFontPopup.addItems(withTitles: availableFontFamilies)
+        desktopLyricsFontPopup.bezelStyle = .glass
+        desktopLyricsFontPopup.target = self
+        desktopLyricsFontPopup.action = #selector(desktopLyricsFontSelected)
+        settingsContentView.addSubview(desktopLyricsFontPopup)
+        dynamicIslandLyricsFontPopup.addItem(withTitle: "系统默认")
+        dynamicIslandLyricsFontPopup.addItems(withTitles: availableFontFamilies)
+        dynamicIslandLyricsFontPopup.bezelStyle = .glass
+        dynamicIslandLyricsFontPopup.target = self
+        dynamicIslandLyricsFontPopup.action = #selector(dynamicIslandLyricsFontSelected)
+        settingsContentView.addSubview(dynamicIslandLyricsFontPopup)
+        desktopLyricsFontSizeValueLabel.alignment = .right
+        desktopLyricsWidthValueLabel.alignment = .right
+        dynamicIslandLyricsWidthValueLabel.alignment = .right
+        dynamicIslandLyricsBlankWidthValueLabel.alignment = .right
+        dynamicIslandLyricsHeightValueLabel.alignment = .right
+        dynamicIslandLyricsSlantRatioValueLabel.alignment = .right
+        dynamicIslandLyricsCornerRatioValueLabel.alignment = .right
+        dynamicIslandLyricsFontSizeValueLabel.alignment = .right
+        menuBarLyricsWidthValueLabel.alignment = .right
+        desktopLyricsWidthSlider.target = self
+        desktopLyricsWidthSlider.action = #selector(desktopLyricsWidthChanged)
+        settingsContentView.addSubview(desktopLyricsWidthSlider)
+        desktopLyricsFontSizeSlider.target = self
+        desktopLyricsFontSizeSlider.action = #selector(desktopLyricsFontSizeChanged)
+        settingsContentView.addSubview(desktopLyricsFontSizeSlider)
+        dynamicIslandLyricsWidthSlider.target = self
+        dynamicIslandLyricsWidthSlider.action = #selector(dynamicIslandLyricsWidthChanged)
+        settingsContentView.addSubview(dynamicIslandLyricsWidthSlider)
+        dynamicIslandLyricsBlankWidthSlider.target = self
+        dynamicIslandLyricsBlankWidthSlider.action = #selector(dynamicIslandLyricsBlankWidthChanged)
+        settingsContentView.addSubview(dynamicIslandLyricsBlankWidthSlider)
+        dynamicIslandLyricsHeightSlider.target = self
+        dynamicIslandLyricsHeightSlider.action = #selector(dynamicIslandLyricsHeightChanged)
+        settingsContentView.addSubview(dynamicIslandLyricsHeightSlider)
+        dynamicIslandLyricsSlantRatioSlider.target = self
+        dynamicIslandLyricsSlantRatioSlider.action = #selector(dynamicIslandLyricsSlantRatioChanged)
+        settingsContentView.addSubview(dynamicIslandLyricsSlantRatioSlider)
+        dynamicIslandLyricsCornerRatioSlider.target = self
+        dynamicIslandLyricsCornerRatioSlider.action = #selector(dynamicIslandLyricsCornerRatioChanged)
+        settingsContentView.addSubview(dynamicIslandLyricsCornerRatioSlider)
+        dynamicIslandLyricsFontSizeSlider.target = self
+        dynamicIslandLyricsFontSizeSlider.action = #selector(dynamicIslandLyricsFontSizeChanged)
+        settingsContentView.addSubview(dynamicIslandLyricsFontSizeSlider)
+        menuBarLyricsWidthSlider.target = self
+        menuBarLyricsWidthSlider.action = #selector(menuBarLyricsWidthChanged)
+        settingsContentView.addSubview(menuBarLyricsWidthSlider)
+        desktopLyricsTextColorWell.target = self
+        desktopLyricsTextColorWell.action = #selector(desktopLyricsTextColorChanged)
+        desktopLyricsStrokeColorWell.target = self
+        desktopLyricsStrokeColorWell.action = #selector(desktopLyricsStrokeColorChanged)
+        desktopLyricsStrokeWidthSlider.target = self
+        desktopLyricsStrokeWidthSlider.action = #selector(desktopLyricsStrokeWidthChanged)
+        settingsContentView.addSubview(desktopLyricsTextColorWell)
+        settingsContentView.addSubview(desktopLyricsStrokeColorWell)
+        settingsContentView.addSubview(desktopLyricsStrokeWidthSlider)
+        musicLyricsWhitelistButton.bezelStyle = .glass
+        musicLyricsWhitelistButton.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        musicLyricsWhitelistButton.target = self
+        musicLyricsWhitelistButton.action = #selector(showMusicLyricsWhitelistSettingsPage)
+        settingsContentView.addSubview(musicLyricsWhitelistButton)
+        whitelistAddButton.onClick = { [weak self] in self?.addWhitelistApplication() }
+        whitelistRemoveButton.onClick = { [weak self] in self?.removeWhitelistApplication() }
+        whitelistTableView.headerView = nil
+        whitelistTableView.rowHeight = 62
+        whitelistTableView.intercellSpacing = NSSize(width: 0, height: 6)
+        whitelistTableView.backgroundColor = .clear
+        whitelistTableView.selectionHighlightStyle = .none
+        whitelistTableView.allowsMultipleSelection = false
+        whitelistTableView.allowsEmptySelection = true
+        whitelistTableView.focusRingType = .none
+        whitelistTableView.usesAlternatingRowBackgroundColors = false
+        whitelistTableView.delegate = self
+        whitelistTableView.dataSource = self
+        let whitelistColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("app"))
+        whitelistColumn.resizingMask = .autoresizingMask
+        whitelistTableView.addTableColumn(whitelistColumn)
+        whitelistScrollView.documentView = whitelistTableView
+        configureSystemScrollView(whitelistScrollView)
+        whitelistScrollView.verticalScrollElasticity = .automatic
+        settingsContentView.addSubview(whitelistScrollView)
+        settingsContentView.addSubview(whitelistAddButton)
+        settingsContentView.addSubview(whitelistRemoveButton)
+
+        [appleMusicLoginButton, appleMusicClearTokenButton].forEach { button in
+            button.bezelStyle = .glass
+            button.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+            settingsContentView.addSubview(button)
+        }
+        appleMusicLoginButton.target = self
+        appleMusicLoginButton.action = #selector(appleMusicLoginClicked)
+        appleMusicClearTokenButton.target = self
+        appleMusicClearTokenButton.action = #selector(appleMusicClearTokenClicked)
 
         showModulesPage()
     }
 
-    private func configureCheckbox(_ checkbox: NSButton, size: CGFloat, weight: NSFont.Weight, action: Selector) {
+    private func configureCheckbox(
+        _ checkbox: NSButton,
+        size: CGFloat,
+        weight: NSFont.Weight,
+        action: Selector,
+        in containerView: NSView? = nil
+    ) {
         checkbox.font = NSFont.systemFont(ofSize: size, weight: weight)
         checkbox.target = self
         checkbox.action = action
-        addSubview(checkbox)
+        (containerView ?? self).addSubview(checkbox)
     }
 
     func refreshGlassSurfaces() {
@@ -258,6 +558,10 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
     @objc private func activeVisionCheckboxChanged() {
         onActiveVisionChanged?(activeVisionCheckbox.state == .on)
+    }
+
+    @objc private func desktopLyricsCheckboxChanged() {
+        onDesktopLyricsChanged?(desktopLyricsCheckbox.state == .on)
     }
 
     @objc private func loginItemCheckboxChanged() {
@@ -289,6 +593,8 @@ final class ControlView: NSView, NSTextFieldDelegate {
     @objc private func backButtonClicked() {
         if page == .searchSettings || page == .screenshotSettings {
             showSelectionToolbarSettingsPage()
+        } else if page == .appleMusicSettings || page == .musicLyricsWhitelistSettings || page == .desktopLyricsSurfaceSettings || page == .dynamicIslandLyricsSettings || page == .menuBarLyricsSettings {
+            showDesktopLyricsSettingsPage()
         } else {
             showModulesPage()
         }
@@ -299,29 +605,55 @@ final class ControlView: NSView, NSTextFieldDelegate {
         layoutForCurrentPage()
     }
 
-    @objc private func showCapsLockSettingsPage() {
-        page = .capsLockSettings
+    private func showSettingsPage(_ newPage: Page) {
+        shouldScrollSettingsContentToTop = page != newPage
+        page = newPage
         layoutForCurrentPage()
+    }
+
+    @objc private func showCapsLockSettingsPage() {
+        showSettingsPage(.capsLockSettings)
     }
 
     @objc private func showSelectionToolbarSettingsPage() {
-        page = .selectionToolbarSettings
-        layoutForCurrentPage()
+        showSettingsPage(.selectionToolbarSettings)
     }
 
     @objc private func showActiveVisionSettingsPage() {
-        page = .activeVisionSettings
-        layoutForCurrentPage()
+        showSettingsPage(.activeVisionSettings)
+    }
+
+    @objc private func showDesktopLyricsSettingsPage() {
+        showSettingsPage(.desktopLyricsSettings)
+    }
+
+    private func showDesktopLyricsSurfaceSettingsPage() {
+        showSettingsPage(.desktopLyricsSurfaceSettings)
+    }
+
+    private func showDynamicIslandLyricsSettingsPage() {
+        showSettingsPage(.dynamicIslandLyricsSettings)
+    }
+
+    private func showMenuBarLyricsSettingsPage() {
+        showSettingsPage(.menuBarLyricsSettings)
+    }
+
+    private func showAppleMusicSettingsPage() {
+        showSettingsPage(.appleMusicSettings)
+    }
+
+    @objc private func showMusicLyricsWhitelistSettingsPage() {
+        refreshAvailableApplications()
+        showSettingsPage(.musicLyricsWhitelistSettings)
     }
 
     private func showSearchSettingsPage() {
-        page = .searchSettings
-        layoutForCurrentPage()
+        showSettingsPage(.searchSettings)
     }
 
     private func showScreenshotSettingsPage() {
-        page = .screenshotSettings
-        layoutForCurrentPage()
+        showSettingsPage(.screenshotSettings)
     }
 
     @objc private func searchEngineSelected() {
@@ -344,8 +676,7 @@ final class ControlView: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidEndEditing(_ notification: Notification) {
-        guard notification.object as? NSTextField === searchTemplateField else { return }
-        commitSearchTemplate()
+        if notification.object as? NSTextField === searchTemplateField { commitSearchTemplate() }
     }
 
     private func commitSearchTemplate() {
@@ -389,6 +720,301 @@ final class ControlView: NSView, NSTextFieldDelegate {
         onActiveVisionNotifyChanged?(activeVisionNotifyCheckbox.state == .on)
     }
 
+    @objc private func desktopLyricsLanguageSelected() {
+        let index = desktopLyricsLanguagePopup.indexOfSelectedItem
+        guard DesktopLyricsPreferredLanguage.allCases.indices.contains(index) else { return }
+        onDesktopLyricsPreferredLanguageChanged?(DesktopLyricsPreferredLanguage.allCases[index])
+    }
+
+    @objc private func desktopLyricsSurfaceCheckboxChanged() {
+        onDesktopLyricsSurfaceChanged?(desktopLyricsSurfaceCheckbox.state == .on)
+    }
+
+    @objc private func dynamicIslandLyricsCheckboxChanged() {
+        onDynamicIslandLyricsChanged?(dynamicIslandLyricsCheckbox.state == .on)
+    }
+
+    @objc private func dynamicIslandLyricsSpectrumCheckboxChanged() {
+        onDynamicIslandLyricsSpectrumChanged?(dynamicIslandLyricsSpectrumCheckbox.state == .on)
+    }
+
+    @objc private func dynamicIslandLyricsHideOnHoverCheckboxChanged() {
+        onDynamicIslandLyricsHideOnHoverChanged?(dynamicIslandLyricsHideOnHoverCheckbox.state == .on)
+    }
+
+    @objc private func menuBarLyricsCheckboxChanged() {
+        onMenuBarLyricsChanged?(menuBarLyricsCheckbox.state == .on)
+    }
+
+    @objc private func desktopLyricsWidthChanged() {
+        onDesktopLyricsWidthChanged?(desktopLyricsWidthSlider.doubleValue)
+    }
+
+    @objc private func desktopLyricsAlignmentSelected() {
+        let index = desktopLyricsAlignmentPopup.indexOfSelectedItem
+        guard LyricsTextAlignment.allCases.indices.contains(index) else { return }
+        onDesktopLyricsAlignmentChanged?(LyricsTextAlignment.allCases[index])
+    }
+
+    @objc private func dynamicIslandLyricsWidthChanged() {
+        onDynamicIslandLyricsWidthChanged?(dynamicIslandLyricsWidthSlider.doubleValue)
+    }
+
+    @objc private func dynamicIslandLyricsBlankWidthChanged() {
+        onDynamicIslandLyricsBlankWidthChanged?(dynamicIslandLyricsBlankWidthSlider.doubleValue)
+    }
+
+    @objc private func dynamicIslandLyricsHeightChanged() {
+        dynamicIslandLyricsHeightValueLabel.stringValue = "\(Int(round(dynamicIslandLyricsHeightSlider.doubleValue))) px"
+        onDynamicIslandLyricsHeightChanged?(dynamicIslandLyricsHeightSlider.doubleValue)
+    }
+
+    @objc private func dynamicIslandLyricsSlantRatioChanged() {
+        dynamicIslandLyricsSlantRatioValueLabel.stringValue = "\(Int(round(dynamicIslandLyricsSlantRatioSlider.doubleValue)))"
+        onDynamicIslandLyricsSlantRatioChanged?(dynamicIslandLyricsSlantRatioSlider.doubleValue / 100.0)
+    }
+
+    @objc private func dynamicIslandLyricsCornerRatioChanged() {
+        dynamicIslandLyricsCornerRatioValueLabel.stringValue = "\(Int(round(dynamicIslandLyricsCornerRatioSlider.doubleValue)))"
+        onDynamicIslandLyricsCornerRatioChanged?(dynamicIslandLyricsCornerRatioSlider.doubleValue / 100.0)
+    }
+
+    @objc private func dynamicIslandLyricsFontSizeChanged() {
+        dynamicIslandLyricsFontSizeValueLabel.stringValue = "\(Int(round(dynamicIslandLyricsFontSizeSlider.doubleValue)))"
+        onDynamicIslandLyricsFontSizeChanged?(dynamicIslandLyricsFontSizeSlider.doubleValue)
+    }
+
+    @objc private func dynamicIslandLyricsFontSelected() {
+        let title = dynamicIslandLyricsFontPopup.titleOfSelectedItem ?? ""
+        onDynamicIslandLyricsFontNameChanged?(title == "系统默认" ? "" : title)
+    }
+
+    @objc private func menuBarLyricsWidthChanged() {
+        onMenuBarLyricsWidthChanged?(menuBarLyricsWidthSlider.doubleValue)
+    }
+
+    @objc private func menuBarLyricsAlignmentSelected() {
+        let index = menuBarLyricsAlignmentPopup.indexOfSelectedItem
+        guard LyricsTextAlignment.allCases.indices.contains(index) else { return }
+        onMenuBarLyricsAlignmentChanged?(LyricsTextAlignment.allCases[index])
+    }
+
+    @objc private func desktopLyricsTranslationCheckboxChanged() {
+        onDesktopLyricsShowsTranslationChanged?(desktopLyricsTranslationCheckbox.state == .on)
+    }
+
+    @objc private func desktopLyricsFontSizeChanged() {
+        onDesktopLyricsFontSizeChanged?(desktopLyricsFontSizeSlider.doubleValue)
+    }
+
+    @objc private func desktopLyricsLockCheckboxChanged() {
+        onDesktopLyricsLockedChanged?(desktopLyricsLockCheckbox.state == .on)
+    }
+
+    @objc private func desktopLyricsStyleSelected() {
+        let index = desktopLyricsStylePopup.indexOfSelectedItem
+        guard DesktopLyricsStylePreset.allCases.indices.contains(index) else { return }
+        onDesktopLyricsStylePresetChanged?(DesktopLyricsStylePreset.allCases[index])
+    }
+
+    @objc private func desktopLyricsFontSelected() {
+        let title = desktopLyricsFontPopup.titleOfSelectedItem ?? ""
+        onDesktopLyricsFontNameChanged?(title == "系统默认" ? "" : title)
+    }
+
+    @objc private func desktopLyricsTextColorChanged() {
+        onDesktopLyricsTextColorChanged?(desktopLyricsTextColorWell.color.hexString)
+    }
+
+    @objc private func desktopLyricsStrokeColorChanged() {
+        onDesktopLyricsStrokeColorChanged?(desktopLyricsStrokeColorWell.color.hexString)
+    }
+
+    @objc private func desktopLyricsStrokeWidthChanged() {
+        onDesktopLyricsStrokeWidthChanged?(desktopLyricsStrokeWidthSlider.doubleValue)
+    }
+
+    @objc private func appleMusicLoginClicked() {
+        onAppleMusicLoginRequested?()
+    }
+
+    @objc private func appleMusicClearTokenClicked() {
+        onAppleMusicTokenCleared?()
+    }
+
+    private func addWhitelistApplication() {
+        refreshAvailableApplications()
+        let selectedIDs = Set(whitelistApplications.map(\.bundleIdentifier))
+        let candidates = availableApplications.filter { !selectedIDs.contains($0.bundleIdentifier) }
+        guard !candidates.isEmpty else { return }
+
+        let menu = NSMenu()
+        for app in candidates {
+            let item = NSMenuItem(title: app.displayName, action: #selector(addWhitelistApplicationFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = app.bundleIdentifier
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: whitelistAddButton.bounds.height + 4), in: whitelistAddButton)
+    }
+
+    private func removeWhitelistApplication() {
+        let selectedRow = whitelistTableView.selectedRow
+        guard whitelistApplications.indices.contains(selectedRow) else { return }
+        whitelistApplications.remove(at: selectedRow)
+        commitWhitelistApplications()
+    }
+
+    @objc private func addWhitelistApplicationFromMenu(_ sender: NSMenuItem) {
+        guard let bundleIdentifier = sender.representedObject as? String,
+              let app = availableApplications.first(where: { $0.bundleIdentifier == bundleIdentifier }),
+              !whitelistApplications.contains(where: { $0.bundleIdentifier == bundleIdentifier }) else { return }
+        whitelistApplications.append(app)
+        whitelistApplications.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        commitWhitelistApplications()
+    }
+
+    private func commitWhitelistApplications() {
+        onMusicLyricsAppWhitelistChanged?(whitelistApplications.isEmpty ? "__empty__" : whitelistApplications.map(\.bundleIdentifier).joined(separator: "\n"))
+    }
+
+    private func refreshAvailableApplications() {
+        let roots = [
+            "/Applications",
+            "/System/Applications",
+            NSHomeDirectory() + "/Applications"
+        ]
+        var appsByBundleID: [String: ApplicationChoice] = [:]
+        let fileManager = FileManager.default
+        for root in roots {
+            guard let enumerator = fileManager.enumerator(
+                at: URL(fileURLWithPath: root),
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            ) else { continue }
+            for case let url as URL in enumerator where url.pathExtension == "app" {
+                guard let bundle = Bundle(url: url),
+                      let bundleIdentifier = bundle.bundleIdentifier,
+                      !bundleIdentifier.isEmpty else { continue }
+                let displayName = localizedApplicationName(bundle: bundle, url: url)
+                appsByBundleID[bundleIdentifier] = ApplicationChoice(
+                    bundleIdentifier: bundleIdentifier,
+                    displayName: displayName,
+                    path: url.path
+                )
+            }
+        }
+        availableApplications = appsByBundleID.values.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        whitelistApplications.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let identifier = NSUserInterfaceItemIdentifier("WhitelistApplicationCell")
+        let view = (tableView.makeView(withIdentifier: identifier, owner: self) as? WhitelistApplicationCell) ?? WhitelistApplicationCell()
+        view.identifier = identifier
+        let app = whitelistApplications.indices.contains(row) ? whitelistApplications[row] : nil
+        view.set(
+            title: app?.displayName ?? "",
+            subtitle: app?.bundleIdentifier ?? "",
+            isSelected: tableView.selectedRow == row
+        )
+        return view
+    }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        WhitelistApplicationRowView()
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        whitelistApplications.indices.contains(row)
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateWhitelistSelectionState()
+    }
+
+    private func localizedApplicationName(bundle: Bundle, url: URL) -> String {
+        let keys = ["CFBundleDisplayName", "CFBundleName"]
+        for key in keys {
+            if let value = bundle.localizedInfoDictionary?[key] as? String, !value.isEmpty { return value }
+            if let value = bundle.infoDictionary?[key] as? String, !value.isEmpty { return value }
+        }
+        return url.deletingPathExtension().lastPathComponent
+    }
+
+    private var settingsContentWidth: CGFloat {
+        let scrollerGutter = settingsScrollView.hasVerticalScroller ? Metrics.overlayScrollerSafeGutter : 0
+        return max(0, settingsScrollView.contentView.bounds.width - Metrics.sectionInset * 2 - scrollerGutter)
+    }
+
+    private var whitelistContentSafeGutter: CGFloat {
+        whitelistScrollView.hasVerticalScroller ? Metrics.overlayScrollerSafeGutter : 0
+    }
+
+    private func configureSystemScrollView(_ scrollView: NSScrollView) {
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        scrollView.scrollerInsets = NSEdgeInsets(
+            top: Metrics.overlayScrollerVerticalInset,
+            left: 0,
+            bottom: Metrics.overlayScrollerVerticalInset,
+            right: Metrics.overlayScrollerRightInset
+        )
+    }
+
+    private func updateVerticalScrollerVisibility(for scrollView: NSScrollView, contentHeight: CGFloat) {
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        scrollView.scrollerInsets = NSEdgeInsets(
+            top: Metrics.overlayScrollerVerticalInset,
+            left: 0,
+            bottom: Metrics.overlayScrollerVerticalInset,
+            right: Metrics.overlayScrollerRightInset
+        )
+
+        let visibleHeight = max(0, scrollView.contentView.bounds.height)
+        let shouldShowVerticalScroller = contentHeight > visibleHeight + 1
+        if scrollView.hasVerticalScroller != shouldShowVerticalScroller {
+            scrollView.hasVerticalScroller = shouldShowVerticalScroller
+        }
+
+        scrollView.tile()
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    private func prepareSettingsContent(minimumHeight: CGFloat) {
+        updateVerticalScrollerVisibility(for: settingsScrollView, contentHeight: minimumHeight)
+        let visibleSize = settingsScrollView.contentView.bounds.size
+        let visibleHeight = max(1, visibleSize.height)
+        let contentWidth = max(1, visibleSize.width)
+        let contentHeight = max(minimumHeight, visibleHeight)
+        let oldOrigin = settingsScrollView.contentView.bounds.origin
+
+        settingsContentHeight = contentHeight
+        settingsContentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
+
+        let maxOriginY = max(0, contentHeight - visibleHeight)
+        let targetOriginY = shouldScrollSettingsContentToTop
+            ? maxOriginY
+            : min(max(oldOrigin.y, 0), maxOriginY)
+        settingsScrollView.contentView.scroll(to: NSPoint(x: 0, y: targetOriginY))
+        settingsScrollView.reflectScrolledClipView(settingsScrollView.contentView)
+        shouldScrollSettingsContentToTop = false
+    }
+
     private func layoutForCurrentPage() {
         glassContainer.frame = bounds
         glassContentView.frame = bounds
@@ -398,26 +1024,40 @@ final class ControlView: NSView, NSTextFieldDelegate {
             layoutModulesPage()
         case .capsLockSettings:
             layoutSettingsBase(title: "大写指示器")
-            clickToDisableCheckbox.isHidden = false
             clickToDisableCheckbox.sizeToFit()
+            prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + clickToDisableCheckbox.frame.height)
+            clickToDisableCheckbox.isHidden = false
             clickToDisableCheckbox.frame.origin = NSPoint(
-                x: settingsCard.frame.minX + Metrics.sectionInset,
-                y: settingsCard.frame.maxY - Metrics.sectionInset - clickToDisableCheckbox.frame.height
+                x: Metrics.sectionInset,
+                y: settingsContentHeight - Metrics.sectionInset - clickToDisableCheckbox.frame.height
             )
         case .selectionToolbarSettings:
             layoutSettingsBase(title: "选区工具栏")
             let rows = selectionToolbarOrder.map { row(for: $0) }
+            prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + Metrics.rowHeight * CGFloat(rows.count))
             for (index, row) in rows.enumerated() {
                 row.isHidden = false
                 row.frame = NSRect(
-                    x: settingsCard.frame.minX + Metrics.sectionInset,
-                    y: settingsCard.frame.maxY - Metrics.sectionInset - Metrics.rowHeight - CGFloat(index) * Metrics.rowHeight,
-                    width: settingsCard.frame.width - Metrics.sectionInset * 2,
+                    x: Metrics.sectionInset,
+                    y: settingsContentHeight - Metrics.sectionInset - Metrics.rowHeight - CGFloat(index) * Metrics.rowHeight,
+                    width: settingsContentWidth,
                     height: Metrics.rowHeight
                 )
             }
         case .activeVisionSettings:
             layoutActiveVisionSettingsPage()
+        case .desktopLyricsSettings:
+            layoutDesktopLyricsSettingsPage()
+        case .desktopLyricsSurfaceSettings:
+            layoutDesktopLyricsSurfaceSettingsPage()
+        case .dynamicIslandLyricsSettings:
+            layoutDynamicIslandLyricsSettingsPage()
+        case .menuBarLyricsSettings:
+            layoutMenuBarLyricsSettingsPage()
+        case .appleMusicSettings:
+            layoutAppleMusicSettingsPage()
+        case .musicLyricsWhitelistSettings:
+            layoutMusicLyricsWhitelistSettingsPage()
         case .searchSettings:
             layoutSearchSettingsPage()
         case .screenshotSettings:
@@ -441,9 +1081,9 @@ final class ControlView: NSView, NSTextFieldDelegate {
 
         hideAllControls()
         show(
-            titleLabel, toolOptionsTitle, toolOptionsCard, loginItemCheckbox, accessibilityCheckbox,
-            moduleTitle, moduleCard, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox,
-            capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, loginItemButton, accessibilityButton,
+            titleLabel, versionLabel, toolOptionsTitle, toolOptionsCard, loginItemCheckbox, accessibilityCheckbox,
+            moduleTitle, moduleCard, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox,
+            capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, loginItemButton, accessibilityButton,
             clearDataAndQuitButton, quitButton
         )
 
@@ -451,6 +1091,14 @@ final class ControlView: NSView, NSTextFieldDelegate {
         titleLabel.frame.origin = NSPoint(
             x: contentX,
             y: height - Metrics.titleTopInset - titleLabel.frame.height
+        )
+
+        versionLabel.stringValue = Self.appVersionDisplayString()
+        versionLabel.sizeToFit()
+        let versionX = min(titleLabel.frame.maxX + 10, contentX + contentWidth - versionLabel.frame.width)
+        versionLabel.frame.origin = NSPoint(
+            x: versionX,
+            y: titleLabel.frame.midY - versionLabel.frame.height / 2 - 0.5
         )
 
         toolOptionsTitle.sizeToFit()
@@ -495,6 +1143,13 @@ final class ControlView: NSView, NSTextFieldDelegate {
             cardFrame: moduleCardFrame
         )
 
+        layoutModuleRow(
+            checkbox: desktopLyricsCheckbox,
+            settingsButton: desktopLyricsSettingsButton,
+            rowY: capsRowY - Metrics.rowHeight * 3,
+            cardFrame: moduleCardFrame
+        )
+
         let gap: CGFloat = 10
         quitButton.frame = NSRect(x: width - Metrics.outerPadding - 54, y: footerY, width: 54, height: Metrics.footerHeight)
         clearDataAndQuitButton.frame = NSRect(x: quitButton.frame.minX - gap - 134, y: footerY, width: 134, height: Metrics.footerHeight)
@@ -529,15 +1184,24 @@ final class ControlView: NSView, NSTextFieldDelegate {
         }
     }
 
+    private func desktopLyricsRow(for source: DesktopLyricsSource) -> DesktopLyricsSourceRow {
+        switch source {
+        case .appleMusic: return appleMusicSourceRow
+        case .qqMusic: return qqMusicSourceRow
+        case .netease: return neteaseSourceRow
+        }
+    }
+
     private func layoutSearchSettingsPage() {
         layoutSettingsBase(title: "搜索")
         show(searchEnginePopup, searchTemplateField)
+        prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + 34 + 52 + 34)
 
-        let contentX = settingsCard.frame.minX + Metrics.sectionInset
-        let contentWidth = settingsCard.frame.width - Metrics.sectionInset * 2
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
         searchEnginePopup.frame = NSRect(
             x: contentX,
-            y: settingsCard.frame.maxY - Metrics.sectionInset - 34,
+            y: settingsContentHeight - Metrics.sectionInset - 34,
             width: 150,
             height: 32
         )
@@ -552,13 +1216,14 @@ final class ControlView: NSView, NSTextFieldDelegate {
     private func layoutScreenshotSettingsPage() {
         layoutSettingsBase(title: "截图")
         show(screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox, screenshotRegionCheckbox)
+        prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + 32 + 42 + 32 + 42 + 24 + 34 + 24)
 
-        let contentX = settingsCard.frame.minX + Metrics.sectionInset
-        let contentWidth = settingsCard.frame.width - Metrics.sectionInset * 2
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
         screenshotSaveLabel.sizeToFit()
         screenshotSaveLabel.frame.origin = NSPoint(
             x: contentX,
-            y: settingsCard.frame.maxY - Metrics.sectionInset - screenshotSaveLabel.frame.height
+            y: settingsContentHeight - Metrics.sectionInset - screenshotSaveLabel.frame.height
         )
         screenshotSaveButton.frame = NSRect(
             x: contentX,
@@ -571,15 +1236,414 @@ final class ControlView: NSView, NSTextFieldDelegate {
         layoutCheckbox(screenshotRegionCheckbox, below: screenshotCopyCheckbox.frame, gap: 34, contentX: contentX)
     }
 
+    private func layoutDesktopLyricsSettingsPage() {
+        layoutSettingsBase(title: "音乐歌词")
+        let rows = desktopLyricsSourceOrder.map { desktopLyricsRow(for: $0) }
+        show(
+            desktopLyricsHintLabel, desktopLyricsLanguageLabel, desktopLyricsLanguagePopup,
+            desktopLyricsSurfaceCheckbox, desktopLyricsSurfaceSettingsButton,
+            dynamicIslandLyricsCheckbox, dynamicIslandLyricsSettingsButton,
+            menuBarLyricsCheckbox, menuBarLyricsSettingsButton,
+            musicLyricsWhitelistLabel, musicLyricsWhitelistButton, lyricsSourceLabel
+        )
+        rows.forEach { show($0) }
+        prepareSettingsContent(minimumHeight: 470 + Metrics.rowHeight * CGFloat(max(0, rows.count - 3)))
+
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
+        desktopLyricsHintLabel.stringValue = "开启需要的歌词形态；点右侧设置图标进入对应子菜单。歌词源和白名单为通用设置。"
+        desktopLyricsHintLabel.frame = NSRect(
+            x: contentX,
+            y: settingsContentHeight - Metrics.sectionInset - 36,
+            width: contentWidth,
+            height: 34
+        )
+
+        desktopLyricsLanguageLabel.sizeToFit()
+        desktopLyricsLanguageLabel.frame.origin = NSPoint(
+            x: contentX,
+            y: desktopLyricsHintLabel.frame.minY - 38
+        )
+        desktopLyricsLanguagePopup.frame = NSRect(
+            x: desktopLyricsLanguageLabel.frame.maxX + 8,
+            y: desktopLyricsLanguageLabel.frame.midY - 16,
+            width: 150,
+            height: 32
+        )
+
+        var rowY = desktopLyricsLanguagePopup.frame.minY - 52
+        layoutLyricsFeatureRow(
+            checkbox: desktopLyricsSurfaceCheckbox,
+            settingsButton: desktopLyricsSurfaceSettingsButton,
+            rowY: rowY,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+        rowY -= Metrics.rowHeight
+        layoutLyricsFeatureRow(
+            checkbox: dynamicIslandLyricsCheckbox,
+            settingsButton: dynamicIslandLyricsSettingsButton,
+            rowY: rowY,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+        rowY -= Metrics.rowHeight
+        layoutLyricsFeatureRow(
+            checkbox: menuBarLyricsCheckbox,
+            settingsButton: menuBarLyricsSettingsButton,
+            rowY: rowY,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+
+        musicLyricsWhitelistLabel.stringValue = "白名单应用："
+        musicLyricsWhitelistLabel.sizeToFit()
+        musicLyricsWhitelistLabel.frame.origin = NSPoint(
+            x: contentX,
+            y: rowY - 44
+        )
+        musicLyricsWhitelistButton.frame = NSRect(
+            x: contentX,
+            y: musicLyricsWhitelistLabel.frame.minY - 38,
+            width: contentWidth,
+            height: 32
+        )
+
+        lyricsSourceLabel.sizeToFit()
+        lyricsSourceLabel.frame.origin = NSPoint(
+            x: contentX,
+            y: musicLyricsWhitelistButton.frame.minY - 42
+        )
+        for (index, row) in rows.enumerated() {
+            row.frame = NSRect(
+                x: contentX,
+                y: lyricsSourceLabel.frame.minY - 8 - Metrics.rowHeight - CGFloat(index) * Metrics.rowHeight,
+                width: contentWidth,
+                height: Metrics.rowHeight
+            )
+        }
+    }
+
+    private func layoutLyricsFeatureRow(
+        checkbox: NSButton,
+        settingsButton: IconButtonView,
+        rowY: CGFloat,
+        contentX: CGFloat,
+        contentWidth: CGFloat
+    ) {
+        let rowMidY = rowY + Metrics.rowHeight / 2
+        checkbox.sizeToFit()
+        checkbox.frame.origin = NSPoint(
+            x: contentX,
+            y: rowMidY - checkbox.frame.height / 2
+        )
+        let hitSize: CGFloat = 30
+        let iconGap: CGFloat = 10
+        let desiredIconX = checkbox.frame.maxX + iconGap
+        let maxIconX = contentX + contentWidth - hitSize
+        settingsButton.frame = NSRect(
+            x: min(desiredIconX, maxIconX),
+            y: rowMidY - hitSize / 2,
+            width: hitSize,
+            height: hitSize
+        )
+    }
+
+    @discardableResult
+    private func layoutSettingsSliderRow(
+        label: NSTextField,
+        slider: NSSlider,
+        valueLabel: NSTextField,
+        y: CGFloat,
+        contentX: CGFloat,
+        contentWidth: CGFloat,
+        valueWidth: CGFloat = 72
+    ) -> CGFloat {
+        label.sizeToFit()
+        label.frame.origin = NSPoint(x: contentX, y: y)
+        valueLabel.frame = NSRect(
+            x: contentX + contentWidth - valueWidth,
+            y: label.frame.minY,
+            width: valueWidth,
+            height: label.frame.height
+        )
+        slider.frame = NSRect(
+            x: label.frame.maxX + 10,
+            y: label.frame.midY - 12,
+            width: valueLabel.frame.minX - label.frame.maxX - 20,
+            height: 24
+        )
+        return slider.frame.minY - 34
+    }
+
+    private func layoutDesktopLyricsSurfaceSettingsPage() {
+        layoutSettingsBase(title: "桌面歌词")
+        show(
+            desktopLyricsWidthLabel, desktopLyricsWidthSlider, desktopLyricsWidthValueLabel,
+            desktopLyricsAlignmentLabel, desktopLyricsAlignmentPopup,
+            desktopLyricsTranslationCheckbox, desktopLyricsLockCheckbox,
+            desktopLyricsStyleLabel, desktopLyricsStylePopup,
+            desktopLyricsFontSizeLabel, desktopLyricsFontSizeSlider, desktopLyricsFontSizeValueLabel,
+            desktopLyricsFontLabel, desktopLyricsFontPopup,
+            desktopLyricsTextColorLabel, desktopLyricsTextColorWell,
+            desktopLyricsStrokeColorLabel, desktopLyricsStrokeColorWell,
+            desktopLyricsStrokeWidthLabel, desktopLyricsStrokeWidthSlider, desktopLyricsStrokeWidthValueLabel
+        )
+        prepareSettingsContent(minimumHeight: 474)
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
+        var y = settingsContentHeight - Metrics.sectionInset - 24
+        y = layoutSettingsSliderRow(
+            label: desktopLyricsWidthLabel,
+            slider: desktopLyricsWidthSlider,
+            valueLabel: desktopLyricsWidthValueLabel,
+            y: y,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+
+        desktopLyricsAlignmentLabel.sizeToFit()
+        desktopLyricsAlignmentLabel.frame.origin = NSPoint(x: contentX, y: y)
+        desktopLyricsAlignmentPopup.frame = NSRect(
+            x: desktopLyricsAlignmentLabel.frame.maxX + 10,
+            y: desktopLyricsAlignmentLabel.frame.midY - 16,
+            width: 130,
+            height: 32
+        )
+        y = desktopLyricsAlignmentPopup.frame.minY - 34
+
+        desktopLyricsTranslationCheckbox.sizeToFit()
+        desktopLyricsLockCheckbox.sizeToFit()
+        desktopLyricsTranslationCheckbox.frame.origin = NSPoint(x: contentX, y: y)
+        desktopLyricsLockCheckbox.frame.origin = NSPoint(x: contentX + 190, y: y)
+
+        desktopLyricsStyleLabel.sizeToFit()
+        desktopLyricsStyleLabel.frame.origin = NSPoint(x: contentX, y: y - 38)
+        desktopLyricsStylePopup.frame = NSRect(
+            x: desktopLyricsStyleLabel.frame.maxX + 10,
+            y: desktopLyricsStyleLabel.frame.midY - 16,
+            width: 150,
+            height: 32
+        )
+
+        y = layoutSettingsSliderRow(
+            label: desktopLyricsFontSizeLabel,
+            slider: desktopLyricsFontSizeSlider,
+            valueLabel: desktopLyricsFontSizeValueLabel,
+            y: desktopLyricsStylePopup.frame.minY - 36,
+            contentX: contentX,
+            contentWidth: contentWidth,
+            valueWidth: 58
+        )
+
+        desktopLyricsFontLabel.sizeToFit()
+        desktopLyricsFontLabel.frame.origin = NSPoint(x: contentX, y: y)
+        desktopLyricsFontPopup.frame = NSRect(
+            x: desktopLyricsFontLabel.frame.maxX + 10,
+            y: desktopLyricsFontLabel.frame.midY - 16,
+            width: contentWidth - desktopLyricsFontLabel.frame.width - 10,
+            height: 32
+        )
+
+        desktopLyricsTextColorLabel.sizeToFit()
+        desktopLyricsTextColorLabel.frame.origin = NSPoint(x: contentX, y: desktopLyricsFontPopup.frame.minY - 38)
+        desktopLyricsTextColorWell.frame = NSRect(x: desktopLyricsTextColorLabel.frame.maxX + 10, y: desktopLyricsTextColorLabel.frame.midY - 13, width: 56, height: 26)
+        desktopLyricsStrokeColorLabel.sizeToFit()
+        desktopLyricsStrokeColorLabel.frame.origin = NSPoint(x: contentX + 180, y: desktopLyricsTextColorLabel.frame.minY)
+        desktopLyricsStrokeColorWell.frame = NSRect(x: desktopLyricsStrokeColorLabel.frame.maxX + 10, y: desktopLyricsStrokeColorLabel.frame.midY - 13, width: 56, height: 26)
+
+        _ = layoutSettingsSliderRow(
+            label: desktopLyricsStrokeWidthLabel,
+            slider: desktopLyricsStrokeWidthSlider,
+            valueLabel: desktopLyricsStrokeWidthValueLabel,
+            y: desktopLyricsTextColorLabel.frame.minY - 38,
+            contentX: contentX,
+            contentWidth: contentWidth,
+            valueWidth: 48
+        )
+    }
+
+    private func layoutDynamicIslandLyricsSettingsPage() {
+        layoutSettingsBase(title: "灵动大陆歌词")
+        show(
+            dynamicIslandLyricsWidthLabel, dynamicIslandLyricsWidthSlider, dynamicIslandLyricsWidthValueLabel,
+            dynamicIslandLyricsBlankWidthLabel, dynamicIslandLyricsBlankWidthSlider, dynamicIslandLyricsBlankWidthValueLabel,
+            dynamicIslandLyricsHeightLabel, dynamicIslandLyricsHeightSlider, dynamicIslandLyricsHeightValueLabel,
+            dynamicIslandLyricsSlantRatioLabel, dynamicIslandLyricsSlantRatioSlider, dynamicIslandLyricsSlantRatioValueLabel,
+            dynamicIslandLyricsCornerRatioLabel, dynamicIslandLyricsCornerRatioSlider, dynamicIslandLyricsCornerRatioValueLabel,
+            dynamicIslandLyricsFontSizeLabel, dynamicIslandLyricsFontSizeSlider, dynamicIslandLyricsFontSizeValueLabel,
+            dynamicIslandLyricsFontLabel, dynamicIslandLyricsFontPopup,
+            dynamicIslandLyricsSpectrumCheckbox, dynamicIslandLyricsHideOnHoverCheckbox
+        )
+        prepareSettingsContent(minimumHeight: 430)
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
+        var y = settingsContentHeight - Metrics.sectionInset - 24
+        y = layoutSettingsSliderRow(
+            label: dynamicIslandLyricsWidthLabel,
+            slider: dynamicIslandLyricsWidthSlider,
+            valueLabel: dynamicIslandLyricsWidthValueLabel,
+            y: y,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+        y = layoutSettingsSliderRow(
+            label: dynamicIslandLyricsBlankWidthLabel,
+            slider: dynamicIslandLyricsBlankWidthSlider,
+            valueLabel: dynamicIslandLyricsBlankWidthValueLabel,
+            y: y,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+        y = layoutSettingsSliderRow(
+            label: dynamicIslandLyricsHeightLabel,
+            slider: dynamicIslandLyricsHeightSlider,
+            valueLabel: dynamicIslandLyricsHeightValueLabel,
+            y: y,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+        y = layoutSettingsSliderRow(
+            label: dynamicIslandLyricsSlantRatioLabel,
+            slider: dynamicIslandLyricsSlantRatioSlider,
+            valueLabel: dynamicIslandLyricsSlantRatioValueLabel,
+            y: y,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+        y = layoutSettingsSliderRow(
+            label: dynamicIslandLyricsCornerRatioLabel,
+            slider: dynamicIslandLyricsCornerRatioSlider,
+            valueLabel: dynamicIslandLyricsCornerRatioValueLabel,
+            y: y,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+        y = layoutSettingsSliderRow(
+            label: dynamicIslandLyricsFontSizeLabel,
+            slider: dynamicIslandLyricsFontSizeSlider,
+            valueLabel: dynamicIslandLyricsFontSizeValueLabel,
+            y: y,
+            contentX: contentX,
+            contentWidth: contentWidth,
+            valueWidth: 58
+        )
+        dynamicIslandLyricsFontLabel.sizeToFit()
+        dynamicIslandLyricsFontLabel.frame.origin = NSPoint(x: contentX, y: y)
+        dynamicIslandLyricsFontPopup.frame = NSRect(
+            x: dynamicIslandLyricsFontLabel.frame.maxX + 10,
+            y: dynamicIslandLyricsFontLabel.frame.midY - 16,
+            width: contentWidth - dynamicIslandLyricsFontLabel.frame.width - 10,
+            height: 32
+        )
+        y = dynamicIslandLyricsFontPopup.frame.minY - 36
+        dynamicIslandLyricsSpectrumCheckbox.sizeToFit()
+        dynamicIslandLyricsSpectrumCheckbox.frame.origin = NSPoint(x: contentX, y: y)
+        layoutCheckbox(dynamicIslandLyricsHideOnHoverCheckbox, below: dynamicIslandLyricsSpectrumCheckbox.frame, gap: 34, contentX: contentX)
+    }
+
+    private func layoutMenuBarLyricsSettingsPage() {
+        layoutSettingsBase(title: "任务栏歌词")
+        show(menuBarLyricsWidthLabel, menuBarLyricsWidthSlider, menuBarLyricsWidthValueLabel, menuBarLyricsAlignmentLabel, menuBarLyricsAlignmentPopup)
+        prepareSettingsContent(minimumHeight: 154)
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
+        let y = layoutSettingsSliderRow(
+            label: menuBarLyricsWidthLabel,
+            slider: menuBarLyricsWidthSlider,
+            valueLabel: menuBarLyricsWidthValueLabel,
+            y: settingsContentHeight - Metrics.sectionInset - 24,
+            contentX: contentX,
+            contentWidth: contentWidth
+        )
+        menuBarLyricsAlignmentLabel.sizeToFit()
+        menuBarLyricsAlignmentLabel.frame.origin = NSPoint(x: contentX, y: y)
+        menuBarLyricsAlignmentPopup.frame = NSRect(
+            x: menuBarLyricsAlignmentLabel.frame.maxX + 10,
+            y: menuBarLyricsAlignmentLabel.frame.midY - 16,
+            width: 130,
+            height: 32
+        )
+    }
+
+    private func layoutAppleMusicSettingsPage() {
+        layoutSettingsBase(title: "Apple Music")
+        show(appleMusicTokenStatusLabel, appleMusicLoginButton, appleMusicClearTokenButton)
+        prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + 32 + 48 + 32)
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
+        appleMusicTokenStatusLabel.frame = NSRect(
+            x: contentX,
+            y: settingsContentHeight - Metrics.sectionInset - 32,
+            width: contentWidth,
+            height: 28
+        )
+        appleMusicLoginButton.frame = NSRect(x: contentX, y: appleMusicTokenStatusLabel.frame.minY - 48, width: 170, height: 32)
+        appleMusicClearTokenButton.frame = NSRect(x: appleMusicLoginButton.frame.maxX + 12, y: appleMusicLoginButton.frame.minY, width: 170, height: 32)
+    }
+
+    private func layoutMusicLyricsWhitelistSettingsPage() {
+        layoutSettingsBase(title: "白名单应用")
+        show(musicLyricsWhitelistLabel, whitelistScrollView, whitelistAddButton, whitelistRemoveButton)
+        prepareSettingsContent(minimumHeight: 420)
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
+        musicLyricsWhitelistLabel.stringValue = "已允许的应用："
+        musicLyricsWhitelistLabel.sizeToFit()
+        musicLyricsWhitelistLabel.frame.origin = NSPoint(x: contentX, y: settingsContentHeight - Metrics.sectionInset - musicLyricsWhitelistLabel.frame.height)
+        whitelistScrollView.frame = NSRect(
+            x: contentX,
+            y: Metrics.sectionInset + 42,
+            width: contentWidth,
+            height: max(120, musicLyricsWhitelistLabel.frame.minY - Metrics.sectionInset - 56)
+        )
+        updateWhitelistTableLayout()
+        whitelistAddButton.frame = NSRect(x: contentX, y: Metrics.sectionInset, width: 32, height: 32)
+        whitelistRemoveButton.frame = NSRect(x: whitelistAddButton.frame.maxX + 8, y: whitelistAddButton.frame.minY, width: 32, height: 32)
+        whitelistRemoveButton.isEnabled = whitelistTableView.selectedRow >= 0
+    }
+
+    private var whitelistContentHeight: CGFloat {
+        let rowCount = whitelistApplications.count
+        guard rowCount > 0 else { return 0 }
+        return CGFloat(rowCount) * whitelistTableView.rowHeight + CGFloat(max(rowCount - 1, 0)) * whitelistTableView.intercellSpacing.height
+    }
+
+    private func updateWhitelistTableLayout() {
+        updateVerticalScrollerVisibility(for: whitelistScrollView, contentHeight: whitelistContentHeight)
+        let visibleBounds = whitelistScrollView.contentView.bounds
+        let safeTrailingInset = whitelistContentSafeGutter
+        whitelistTableView.contentTrailingSafeInset = safeTrailingInset
+        let tableWidth = max(1, visibleBounds.width)
+        let tableHeight = max(visibleBounds.height, whitelistContentHeight)
+        whitelistTableView.frame = NSRect(x: 0, y: 0, width: tableWidth, height: tableHeight)
+        whitelistTableView.tableColumns.first?.width = tableWidth
+        whitelistTableView.noteNumberOfRowsChanged()
+        whitelistTableView.setNeedsDisplay(whitelistTableView.bounds)
+        updateWhitelistSelectionState()
+    }
+
+    private func updateWhitelistSelectionState() {
+        let selectedRow = whitelistTableView.selectedRow
+        whitelistRemoveButton.isEnabled = selectedRow >= 0 && whitelistApplications.indices.contains(selectedRow)
+        for row in 0..<whitelistTableView.numberOfRows {
+            guard let cell = whitelistTableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WhitelistApplicationCell else { continue }
+            cell.setSelected(row == selectedRow)
+        }
+    }
+
     private func layoutActiveVisionSettingsPage() {
         layoutSettingsBase(title: "主动视觉感知")
         show(activeVisionGazeCheckbox, activeVisionFacingCheckbox, activeVisionNotifyCheckbox)
 
-        let contentX = settingsCard.frame.minX + Metrics.sectionInset
+        let contentX = Metrics.sectionInset
         activeVisionGazeCheckbox.sizeToFit()
+        activeVisionFacingCheckbox.sizeToFit()
+        activeVisionNotifyCheckbox.sizeToFit()
+        prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + activeVisionGazeCheckbox.frame.height + 34 + activeVisionFacingCheckbox.frame.height + 34 + activeVisionNotifyCheckbox.frame.height)
         activeVisionGazeCheckbox.frame.origin = NSPoint(
             x: contentX,
-            y: settingsCard.frame.maxY - Metrics.sectionInset - activeVisionGazeCheckbox.frame.height
+            y: settingsContentHeight - Metrics.sectionInset - activeVisionGazeCheckbox.frame.height
         )
         layoutCheckbox(activeVisionFacingCheckbox, below: activeVisionGazeCheckbox.frame, gap: 34, contentX: contentX)
         layoutCheckbox(activeVisionNotifyCheckbox, below: activeVisionFacingCheckbox.frame, gap: 34, contentX: contentX)
@@ -603,8 +1667,9 @@ final class ControlView: NSView, NSTextFieldDelegate {
         )
 
         hideAllControls()
-        show(settingsTitle, settingsCard, backButton)
+        show(settingsTitle, settingsCard, settingsScrollView, backButton)
 
+        settingsScrollView.frame = cardFrame
         backButton.frame = NSRect(x: contentX, y: headerY, width: 34, height: 34)
         settingsTitle.stringValue = title
         settingsTitle.sizeToFit()
@@ -621,13 +1686,51 @@ final class ControlView: NSView, NSTextFieldDelegate {
     }
 
     private lazy var allControls: [NSView] = [
-        titleLabel, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard,
-        loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, clickToDisableCheckbox,
-        capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, backButton,
+        titleLabel, versionLabel, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard, settingsScrollView,
+        loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, clickToDisableCheckbox,
+        capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, backButton,
         loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, copyRow, pasteRow, searchRow, screenshotRow,
-        searchEnginePopup, searchTemplateField, screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox,
-        screenshotRegionCheckbox, activeVisionGazeCheckbox, activeVisionFacingCheckbox, activeVisionNotifyCheckbox
+        appleMusicSourceRow, qqMusicSourceRow, neteaseSourceRow, searchEnginePopup, searchTemplateField, screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox,
+        screenshotRegionCheckbox, activeVisionGazeCheckbox, activeVisionFacingCheckbox, activeVisionNotifyCheckbox,
+        desktopLyricsHintLabel, desktopLyricsLanguageLabel, desktopLyricsLanguagePopup,
+        desktopLyricsSurfaceCheckbox, desktopLyricsSurfaceSettingsButton, dynamicIslandLyricsCheckbox, dynamicIslandLyricsSettingsButton, dynamicIslandLyricsSpectrumCheckbox, dynamicIslandLyricsHideOnHoverCheckbox, menuBarLyricsCheckbox, menuBarLyricsSettingsButton,
+        desktopLyricsWidthLabel, desktopLyricsWidthSlider, desktopLyricsWidthValueLabel, desktopLyricsAlignmentLabel, desktopLyricsAlignmentPopup,
+        dynamicIslandLyricsWidthLabel, dynamicIslandLyricsWidthSlider, dynamicIslandLyricsWidthValueLabel,
+        dynamicIslandLyricsBlankWidthLabel, dynamicIslandLyricsBlankWidthSlider, dynamicIslandLyricsBlankWidthValueLabel,
+        dynamicIslandLyricsHeightLabel, dynamicIslandLyricsHeightSlider, dynamicIslandLyricsHeightValueLabel,
+        dynamicIslandLyricsSlantRatioLabel, dynamicIslandLyricsSlantRatioSlider, dynamicIslandLyricsSlantRatioValueLabel,
+        dynamicIslandLyricsCornerRatioLabel, dynamicIslandLyricsCornerRatioSlider, dynamicIslandLyricsCornerRatioValueLabel,
+        dynamicIslandLyricsFontLabel, dynamicIslandLyricsFontPopup,
+        dynamicIslandLyricsFontSizeLabel, dynamicIslandLyricsFontSizeSlider, dynamicIslandLyricsFontSizeValueLabel,
+        menuBarLyricsWidthLabel, menuBarLyricsWidthSlider, menuBarLyricsWidthValueLabel, menuBarLyricsAlignmentLabel, menuBarLyricsAlignmentPopup,
+        desktopLyricsTranslationCheckbox, desktopLyricsLockCheckbox,
+        desktopLyricsStyleLabel, desktopLyricsStylePopup,
+        desktopLyricsFontLabel, desktopLyricsFontPopup,
+        desktopLyricsFontSizeLabel, desktopLyricsFontSizeSlider, desktopLyricsFontSizeValueLabel,
+        desktopLyricsTextColorLabel, desktopLyricsTextColorWell,
+        desktopLyricsStrokeColorLabel, desktopLyricsStrokeColorWell,
+        desktopLyricsStrokeWidthLabel, desktopLyricsStrokeWidthSlider, desktopLyricsStrokeWidthValueLabel,
+        musicLyricsWhitelistLabel, musicLyricsWhitelistButton, lyricsSourceLabel,
+        whitelistScrollView, whitelistAddButton, whitelistRemoveButton,
+        appleMusicTokenStatusLabel, appleMusicLoginButton, appleMusicClearTokenButton
     ]
+
+    private static func appVersionDisplayString() -> String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let shortVersion = (info["CFBundleShortVersionString"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let buildVersion = (info["CFBundleVersion"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch (shortVersion?.isEmpty == false ? shortVersion : nil, buildVersion?.isEmpty == false ? buildVersion : nil) {
+        case let (.some(version), .some(build)) where build != version:
+            return "v\(version) (\(build))"
+        case let (.some(version), _):
+            return "v\(version)"
+        case let (_, .some(build)):
+            return "Build \(build)"
+        default:
+            return ""
+        }
+    }
 
     private static func displayName(forDirectoryAt path: String) -> String {
         let directoryURL = path.isEmpty ? defaultScreenshotDirectoryURL() : URL(fileURLWithPath: path, isDirectory: true)
@@ -668,5 +1771,271 @@ final class ControlView: NSView, NSTextFieldDelegate {
         activeVisionFacingCheckbox.state = settings.activeVisionPreventsDisplaySleepOnFacing ? .on : .off
         activeVisionNotifyCheckbox.state = settings.activeVisionNotifiesWhenExtendingDisplaySleep ? .on : .off
     }
+
+    private func renderDesktopLyricsSettings(_ settings: AppSettings) {
+        let hasAppleToken = !settings.appleMusicMediaUserToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let enabledSources = Set(settings.enabledDesktopLyricsSources)
+        appleMusicSourceRow.setEnabled(enabledSources.contains(.appleMusic))
+        qqMusicSourceRow.setEnabled(enabledSources.contains(.qqMusic))
+        neteaseSourceRow.setEnabled(enabledSources.contains(.netease))
+        appleMusicTokenStatusLabel.stringValue = hasAppleToken
+            ? "Apple Music 已登录"
+            : "Apple Music 未登录；QQ 音乐、网易云音乐无需登录。"
+        desktopLyricsLanguagePopup.selectItem(at: DesktopLyricsPreferredLanguage.allCases.firstIndex(of: settings.desktopLyricsPreferredLanguage) ?? 0)
+        desktopLyricsSurfaceCheckbox.state = settings.isDesktopLyricsSurfaceEnabled ? .on : .off
+        dynamicIslandLyricsCheckbox.state = settings.isDynamicIslandLyricsEnabled ? .on : .off
+        dynamicIslandLyricsSpectrumCheckbox.state = settings.isDynamicIslandLyricsSpectrumEnabled ? .on : .off
+        dynamicIslandLyricsHideOnHoverCheckbox.state = settings.isDynamicIslandLyricsHidesOnHover ? .on : .off
+        dynamicIslandLyricsSpectrumCheckbox.isEnabled = settings.isDynamicIslandLyricsEnabled
+        dynamicIslandLyricsHideOnHoverCheckbox.isEnabled = settings.isDynamicIslandLyricsEnabled
+        desktopLyricsWidthSlider.doubleValue = settings.desktopLyricsWidth
+        desktopLyricsWidthValueLabel.stringValue = "\(Int(round(settings.desktopLyricsWidth))) px"
+        desktopLyricsAlignmentPopup.selectItem(at: LyricsTextAlignment.allCases.firstIndex(of: settings.desktopLyricsAlignment) ?? 0)
+        dynamicIslandLyricsWidthSlider.doubleValue = settings.dynamicIslandLyricsWidth
+        dynamicIslandLyricsWidthValueLabel.stringValue = "\(Int(round(settings.dynamicIslandLyricsWidth))) px"
+        dynamicIslandLyricsBlankWidthSlider.doubleValue = settings.dynamicIslandLyricsBlankWidth
+        dynamicIslandLyricsBlankWidthValueLabel.stringValue = "\(Int(round(settings.dynamicIslandLyricsBlankWidth))) px"
+        dynamicIslandLyricsHeightSlider.doubleValue = settings.dynamicIslandLyricsHeight
+        dynamicIslandLyricsHeightValueLabel.stringValue = "\(Int(round(settings.dynamicIslandLyricsHeight))) px"
+        dynamicIslandLyricsSlantRatioSlider.doubleValue = max(1, min(100, settings.dynamicIslandLyricsSlantRatio * 100))
+        dynamicIslandLyricsSlantRatioValueLabel.stringValue = "\(Int(round(dynamicIslandLyricsSlantRatioSlider.doubleValue)))"
+        dynamicIslandLyricsCornerRatioSlider.doubleValue = max(1, min(100, settings.dynamicIslandLyricsCornerRatio * 100))
+        dynamicIslandLyricsCornerRatioValueLabel.stringValue = "\(Int(round(dynamicIslandLyricsCornerRatioSlider.doubleValue)))"
+        dynamicIslandLyricsFontSizeSlider.doubleValue = settings.dynamicIslandLyricsFontSize
+        dynamicIslandLyricsFontSizeValueLabel.stringValue = "\(Int(round(settings.dynamicIslandLyricsFontSize)))"
+        if settings.dynamicIslandLyricsFontName.isEmpty {
+            dynamicIslandLyricsFontPopup.selectItem(withTitle: "系统默认")
+        } else if dynamicIslandLyricsFontPopup.item(withTitle: settings.dynamicIslandLyricsFontName) != nil {
+            dynamicIslandLyricsFontPopup.selectItem(withTitle: settings.dynamicIslandLyricsFontName)
+        } else {
+            dynamicIslandLyricsFontPopup.selectItem(withTitle: "系统默认")
+        }
+        menuBarLyricsCheckbox.state = settings.isMenuBarLyricsEnabled ? .on : .off
+        menuBarLyricsWidthSlider.doubleValue = settings.menuBarLyricsWidth
+        menuBarLyricsWidthValueLabel.stringValue = "\(Int(round(settings.menuBarLyricsWidth))) px"
+        menuBarLyricsAlignmentPopup.selectItem(at: LyricsTextAlignment.allCases.firstIndex(of: settings.menuBarLyricsAlignment) ?? 0)
+        desktopLyricsTranslationCheckbox.state = settings.desktopLyricsShowsTranslation ? .on : .off
+        desktopLyricsLockCheckbox.state = settings.desktopLyricsLocked ? .on : .off
+        desktopLyricsStylePopup.selectItem(at: DesktopLyricsStylePreset.allCases.firstIndex(of: settings.desktopLyricsStylePreset) ?? 0)
+        if settings.desktopLyricsFontName.isEmpty {
+            desktopLyricsFontPopup.selectItem(withTitle: "系统默认")
+        } else {
+            desktopLyricsFontPopup.selectItem(withTitle: settings.desktopLyricsFontName)
+        }
+        desktopLyricsFontSizeSlider.doubleValue = settings.desktopLyricsFontSize
+        desktopLyricsFontSizeValueLabel.stringValue = "\(Int(round(settings.desktopLyricsFontSize)))"
+        let styleDefaults = DesktopLyricsUIPresetDefaults(preset: settings.desktopLyricsStylePreset)
+        desktopLyricsTextColorWell.color = NSColor(hexString: settings.desktopLyricsTextColor) ?? styleDefaults.textColor
+        desktopLyricsStrokeColorWell.color = NSColor(hexString: settings.desktopLyricsStrokeColor) ?? styleDefaults.strokeColor
+        let strokeWidth = settings.desktopLyricsStrokeWidth >= 0 ? settings.desktopLyricsStrokeWidth : styleDefaults.strokeWidth
+        desktopLyricsStrokeWidthSlider.doubleValue = strokeWidth
+        desktopLyricsStrokeWidthValueLabel.stringValue = String(format: "%.1f", strokeWidth)
+        renderWhitelist(settings.musicLyricsAppWhitelist)
+        appleMusicClearTokenButton.isEnabled = hasAppleToken
+    }
+
+    private func renderWhitelist(_ rawValue: String) {
+        currentWhitelistRawValue = rawValue
+        refreshAvailableApplications()
+        if rawValue == "__empty__" {
+            whitelistApplications = []
+        } else if rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            whitelistApplications = defaultWhitelistApplications()
+        } else {
+            whitelistApplications = parsedWhitelistEntries(rawValue)
+        }
+        whitelistTableView.reloadData()
+        if !whitelistApplications.indices.contains(whitelistTableView.selectedRow) {
+            whitelistTableView.deselectAll(nil)
+        }
+        updateWhitelistTableLayout()
+    }
+
+    private func parsedWhitelistEntries(_ rawValue: String) -> [ApplicationChoice] {
+        let ids = Set(rawValue
+            .components(separatedBy: CharacterSet(charactersIn: ",，\n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "__empty__" })
+        return availableApplications
+            .filter { ids.contains($0.bundleIdentifier) }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    private func defaultWhitelistApplications() -> [ApplicationChoice] {
+        availableApplications
+            .filter {
+                let value = "\($0.displayName) \($0.bundleIdentifier)".lowercased()
+                return value.contains("music") || value.contains("音乐")
+            }
+    }
 }
 
+@MainActor
+private final class WhitelistTableView: NSTableView {
+    var contentTrailingSafeInset: CGFloat = 0 {
+        didSet {
+            guard abs(contentTrailingSafeInset - oldValue) > 0.5 else { return }
+            setNeedsDisplay(bounds)
+            let visibleRows = rows(in: visibleRect)
+            guard visibleRows.length > 0 else { return }
+            for row in visibleRows.location..<(visibleRows.location + visibleRows.length) {
+                view(atColumn: 0, row: row, makeIfNecessary: false)?.needsLayout = true
+            }
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let clickedRow = row(at: point)
+        if clickedRow >= 0 {
+            selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
+            window?.makeFirstResponder(self)
+        }
+        super.mouseDown(with: event)
+    }
+}
+
+@MainActor
+private final class WhitelistApplicationCell: NSTableCellView {
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.masksToBounds = false
+
+        titleLabel.font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byTruncatingMiddle
+        addSubview(titleLabel)
+        addSubview(subtitleLabel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func set(title: String, subtitle: String, isSelected: Bool) {
+        titleLabel.stringValue = title
+        subtitleLabel.stringValue = subtitle
+        setSelected(isSelected)
+        needsLayout = true
+    }
+
+    func setSelected(_ isSelected: Bool) {
+        titleLabel.textColor = .labelColor
+        subtitleLabel.textColor = .secondaryLabelColor
+    }
+
+    override func layout() {
+        super.layout()
+        let insetX: CGFloat = 22
+        let overlaySafeInset = (superview as? WhitelistTableView)?.contentTrailingSafeInset ?? 0
+        let trailingInset: CGFloat = 22 + overlaySafeInset
+        let titleHeight: CGFloat = 20
+        let subtitleHeight: CGFloat = 16
+        let verticalGap: CGFloat = 3
+        let totalHeight = titleHeight + verticalGap + subtitleHeight
+        let subtitleY = max(9, floor((bounds.height - totalHeight) / 2))
+        let textWidth = max(0, bounds.width - insetX - trailingInset)
+        subtitleLabel.frame = NSRect(x: insetX, y: subtitleY, width: textWidth, height: subtitleHeight)
+        titleLabel.frame = NSRect(x: insetX, y: subtitleLabel.frame.maxY + verticalGap, width: textWidth, height: titleHeight)
+    }
+}
+
+@MainActor
+private final class WhitelistApplicationRowView: NSTableRowView {
+    override var isSelected: Bool {
+        didSet { needsDisplay = true }
+    }
+
+    override var isEmphasized: Bool {
+        didSet { needsDisplay = true }
+    }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        drawCustomSelectionIfNeeded()
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        drawCustomSelectionIfNeeded()
+    }
+
+    private func drawCustomSelectionIfNeeded() {
+        guard isSelected else { return }
+
+        let tableView = superview as? WhitelistTableView
+        let clipWidth = tableView?.enclosingScrollView?.contentView.bounds.width ?? bounds.width
+        let overlaySafeInset = tableView?.contentTrailingSafeInset ?? 0
+        let selectionX: CGFloat = 12
+        let selectionTrailingInset: CGFloat = 22 + overlaySafeInset
+        let availableWidth = min(bounds.width, clipWidth)
+        let selectionWidth = max(0, availableWidth - selectionX - selectionTrailingInset)
+        let selectionRect = NSRect(
+            x: selectionX,
+            y: 6,
+            width: selectionWidth,
+            height: max(0, bounds.height - 12)
+        )
+
+        NSColor.controlAccentColor.withAlphaComponent(0.20).setFill()
+        NSBezierPath(roundedRect: selectionRect, xRadius: 11, yRadius: 11).fill()
+    }
+}
+
+private struct DesktopLyricsUIPresetDefaults {
+    let textColor: NSColor
+    let strokeColor: NSColor
+    let strokeWidth: Double
+
+    init(preset: DesktopLyricsStylePreset) {
+        switch preset {
+        case .classic:
+            textColor = .white
+            strokeColor = NSColor.black.withAlphaComponent(0.55)
+            strokeWidth = 0.8
+        case .softShadow:
+            textColor = NSColor(calibratedWhite: 0.98, alpha: 1)
+            strokeColor = NSColor.black.withAlphaComponent(0.36)
+            strokeWidth = 0.35
+        case .darkPanel:
+            textColor = NSColor(calibratedWhite: 0.98, alpha: 1)
+            strokeColor = NSColor.black.withAlphaComponent(0.24)
+            strokeWidth = 0
+        case .lightPanel:
+            textColor = NSColor(calibratedWhite: 0.1, alpha: 1)
+            strokeColor = NSColor.white.withAlphaComponent(0.4)
+            strokeWidth = 0
+        case .neon:
+            textColor = NSColor(calibratedRed: 0.78, green: 0.96, blue: 1.0, alpha: 1)
+            strokeColor = NSColor.black.withAlphaComponent(0.5)
+            strokeWidth = 0.6
+        }
+    }
+}
+
+extension NSColor {
+    var hexString: String {
+        let color = usingColorSpace(.sRGB) ?? self
+        let red = Int(round(color.redComponent * 255))
+        let green = Int(round(color.greenComponent * 255))
+        let blue = Int(round(color.blueComponent * 255))
+        return String(format: "#%02X%02X%02X", red, green, blue)
+    }
+
+    convenience init?(hexString: String) {
+        let value = hexString.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespacesAndNewlines))
+        guard value.count == 6, let number = Int(value, radix: 16) else { return nil }
+        self.init(
+            calibratedRed: CGFloat((number >> 16) & 0xff) / 255,
+            green: CGFloat((number >> 8) & 0xff) / 255,
+            blue: CGFloat(number & 0xff) / 255,
+            alpha: 1
+        )
+    }
+}

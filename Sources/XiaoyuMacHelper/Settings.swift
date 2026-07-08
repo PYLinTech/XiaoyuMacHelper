@@ -37,6 +37,115 @@ enum ToolbarAction: String, Sendable {
     }
 }
 
+enum DesktopLyricsSource: String, CaseIterable, Sendable {
+    case appleMusic
+    case qqMusic
+    case netease
+
+    static let defaultOrder: [DesktopLyricsSource] = [.appleMusic, .qqMusic, .netease]
+
+    var title: String {
+        switch self {
+        case .appleMusic: return "Apple Music"
+        case .qqMusic: return "QQ 音乐"
+        case .netease: return "网易云音乐"
+        }
+    }
+}
+
+
+enum DesktopLyricsPreferredLanguage: String, CaseIterable, Sendable {
+    case simplifiedChinese
+    case english
+    case traditionalChinese
+
+    static let defaultValue: DesktopLyricsPreferredLanguage = .simplifiedChinese
+
+    var title: String {
+        switch self {
+        case .simplifiedChinese: return "简体中文"
+        case .english: return "English"
+        case .traditionalChinese: return "繁體中文"
+        }
+    }
+
+    var appleMusicLanguageTag: String {
+        appleMusicLyricsLanguageCandidates[0]
+    }
+
+    var appleMusicLyricsLanguageCandidates: [String] {
+        switch self {
+        case .simplifiedChinese:
+            return ["zh-Hans", "zh-Hans-CN", "zh-CN"]
+        case .english:
+            return ["en-US", "en-GB", "en"]
+        case .traditionalChinese:
+            return ["zh-Hant", "zh-Hant-TW", "zh-TW", "zh-Hant-HK"]
+        }
+    }
+
+    var acceptLanguageHeader: String {
+        switch self {
+        case .simplifiedChinese: return "zh-Hans,zh-Hans-CN;q=0.95,zh-CN;q=0.9,en;q=0.7"
+        case .english: return "en-US,en-GB;q=0.95,en;q=0.9"
+        case .traditionalChinese: return "zh-Hant,zh-Hant-TW;q=0.95,zh-TW;q=0.9,en;q=0.7"
+        }
+    }
+
+    var isSimplifiedChinese: Bool { self == .simplifiedChinese }
+    var isTraditionalChinese: Bool { self == .traditionalChinese }
+    var prefersChineseLyrics: Bool { isSimplifiedChinese || isTraditionalChinese }
+
+    func matches(ttml: String) -> Bool {
+        let lowercased = ttml.lowercased()
+        switch self {
+        case .simplifiedChinese:
+            return lowercased.contains("hans") || lowercased.contains("xml:lang=\"zh-cn") || lowercased.contains("xml:lang='zh-cn")
+        case .traditionalChinese:
+            return lowercased.contains("hant") || lowercased.contains("xml:lang=\"zh-tw") || lowercased.contains("xml:lang='zh-tw")
+        case .english:
+            return lowercased.contains("xml:lang=\"en") || lowercased.contains("xml:lang='en")
+        }
+    }
+}
+
+
+enum LyricsTextAlignment: String, CaseIterable, Sendable {
+    case left
+    case center
+    case right
+
+    static let defaultValue: LyricsTextAlignment = .center
+
+    var title: String {
+        switch self {
+        case .left: return "左对齐"
+        case .center: return "居中"
+        case .right: return "右对齐"
+        }
+    }
+}
+
+enum DesktopLyricsStylePreset: String, CaseIterable, Sendable {
+    case classic
+    case softShadow
+    case darkPanel
+    case lightPanel
+    case neon
+
+    static let defaultValue: DesktopLyricsStylePreset = .classic
+
+    var title: String {
+        switch self {
+        case .classic: return "清晰白字"
+        case .softShadow: return "柔和阴影"
+        case .darkPanel: return "深色浮层"
+        case .lightPanel: return "浅色字幕"
+        case .neon: return "霓虹微光"
+        }
+    }
+}
+
 struct SearchEnginePreset: Equatable {
     let title: String
     let template: String
@@ -70,6 +179,38 @@ struct AppSettings: Equatable, Sendable {
     var screenshotCopiesToClipboard: Bool
     var screenshotSelectsRegion: Bool
     var isActiveVisionEnabled: Bool
+    var isDesktopLyricsEnabled: Bool
+    var isDesktopLyricsSurfaceEnabled: Bool
+    var desktopLyricsWidth: Double
+    var desktopLyricsAlignment: LyricsTextAlignment
+    var isDynamicIslandLyricsEnabled: Bool
+    var dynamicIslandLyricsWidth: Double
+    var dynamicIslandLyricsBlankWidth: Double
+    var dynamicIslandLyricsHeight: Double
+    var dynamicIslandLyricsSlantRatio: Double
+    var dynamicIslandLyricsCornerRatio: Double
+    var dynamicIslandLyricsFontSize: Double
+    var dynamicIslandLyricsFontName: String
+    var isDynamicIslandLyricsSpectrumEnabled: Bool
+    var isDynamicIslandLyricsHidesOnHover: Bool
+    var isMenuBarLyricsEnabled: Bool
+    var menuBarLyricsWidth: Double
+    var menuBarLyricsAlignment: LyricsTextAlignment
+    var enabledDesktopLyricsSources: [DesktopLyricsSource]
+    var desktopLyricsSourceOrder: [DesktopLyricsSource]
+    var desktopLyricsPreferredLanguage: DesktopLyricsPreferredLanguage
+    var desktopLyricsShowsTranslation: Bool
+    var desktopLyricsFontSize: Double
+    var desktopLyricsFontName: String
+    var desktopLyricsTextColor: String
+    var desktopLyricsStrokeColor: String
+    var desktopLyricsStrokeWidth: Double
+    var desktopLyricsPositionX: Double
+    var desktopLyricsPositionY: Double
+    var desktopLyricsLocked: Bool
+    var desktopLyricsStylePreset: DesktopLyricsStylePreset
+    var musicLyricsAppWhitelist: String
+    var appleMusicMediaUserToken: String
     var activeVisionPreventsDisplaySleepOnGaze: Bool
     var activeVisionPreventsDisplaySleepOnFacing: Bool
     var activeVisionNotifiesWhenExtendingDisplaySleep: Bool
@@ -128,13 +269,46 @@ final class SettingsStore {
             selectionToolbarCopyEnabledKey: true,
             selectionToolbarPasteEnabledKey: true,
             selectionToolbarSearchEnabledKey: true,
-            selectionToolbarScreenshotEnabledKey: true,
+            selectionToolbarScreenshotEnabledKey: false,
             selectionToolbarOrderKey: ToolbarAction.configurableCases.map(\.rawValue),
             searchURLTemplateKey: SearchEnginePreset.defaultTemplate,
             screenshotSaveDirectoryKey: defaultScreenshotDirectoryURL().path,
             screenshotCopiesToClipboardKey: true,
             screenshotSelectsRegionKey: false,
             activeVisionEnabledKey: false,
+            desktopLyricsEnabledKey: false,
+            desktopLyricsSurfaceEnabledKey: true,
+            desktopLyricsWidthKey: 980.0,
+            desktopLyricsAlignmentKey: LyricsTextAlignment.defaultValue.rawValue,
+            dynamicIslandLyricsEnabledKey: false,
+            dynamicIslandLyricsWidthKey: 900.0,
+            dynamicIslandLyricsBlankWidthKey: 210.0,
+            dynamicIslandLyricsHeightKey: 58.0,
+            dynamicIslandLyricsBottomRatioKey: 0.55,
+            dynamicIslandLyricsSlantRatioKey: 0.55,
+            dynamicIslandLyricsCornerRatioKey: 0.55,
+            dynamicIslandLyricsFontSizeKey: 15.0,
+            dynamicIslandLyricsFontNameKey: "",
+            dynamicIslandLyricsSpectrumEnabledKey: false,
+            dynamicIslandLyricsHidesOnHoverKey: false,
+            menuBarLyricsEnabledKey: false,
+            menuBarLyricsWidthKey: 220.0,
+            menuBarLyricsAlignmentKey: LyricsTextAlignment.defaultValue.rawValue,
+            "EnabledDesktopLyricsSources": DesktopLyricsSource.defaultOrder.map(\.rawValue),
+            desktopLyricsSourceOrderKey: DesktopLyricsSource.defaultOrder.map(\.rawValue),
+            desktopLyricsPreferredLanguageKey: DesktopLyricsPreferredLanguage.defaultValue.rawValue,
+            desktopLyricsShowsTranslationKey: true,
+            desktopLyricsFontSizeKey: 28.0,
+            desktopLyricsFontNameKey: "",
+            desktopLyricsTextColorKey: "",
+            desktopLyricsStrokeColorKey: "",
+            desktopLyricsStrokeWidthKey: -1.0,
+            desktopLyricsPositionXKey: -1.0,
+            desktopLyricsPositionYKey: -1.0,
+            desktopLyricsLockedKey: false,
+            desktopLyricsStylePresetKey: DesktopLyricsStylePreset.defaultValue.rawValue,
+            musicLyricsAppWhitelistKey: "",
+            appleMusicMediaUserTokenKey: "",
             activeVisionPreventDisplaySleepOnGazeKey: true,
             activeVisionPreventDisplaySleepOnFacingKey: true,
             activeVisionNotifyWhenExtendingDisplaySleepKey: true
@@ -149,6 +323,26 @@ final class SettingsStore {
     func read() -> AppSettings {
         let savedOrder = defaults.stringArray(forKey: selectionToolbarOrderKey) ?? []
         let order = normalizedOrder(savedOrder.compactMap(ToolbarAction.init(rawValue:)))
+        let savedDesktopLyricsSourceOrder = defaults.stringArray(forKey: desktopLyricsSourceOrderKey) ?? []
+        let desktopLyricsSourceOrder = normalizedDesktopLyricsSourceOrder(savedDesktopLyricsSourceOrder.compactMap(DesktopLyricsSource.init(rawValue:)))
+        let savedEnabledSources = defaults.stringArray(forKey: "EnabledDesktopLyricsSources") ?? DesktopLyricsSource.defaultOrder.map(\.rawValue)
+        let enabledSources = normalizedEnabledDesktopLyricsSources(savedEnabledSources.compactMap(DesktopLyricsSource.init(rawValue:)))
+        let preferredLanguage = defaults.string(forKey: desktopLyricsPreferredLanguageKey)
+            .flatMap(DesktopLyricsPreferredLanguage.init(rawValue:)) ?? DesktopLyricsPreferredLanguage.defaultValue
+        let stylePreset = defaults.string(forKey: desktopLyricsStylePresetKey)
+            .flatMap(DesktopLyricsStylePreset.init(rawValue:)) ?? DesktopLyricsStylePreset.defaultValue
+        let desktopLyricsAlignment = defaults.string(forKey: desktopLyricsAlignmentKey)
+            .flatMap(LyricsTextAlignment.init(rawValue:)) ?? LyricsTextAlignment.defaultValue
+        let menuBarLyricsAlignment = defaults.string(forKey: menuBarLyricsAlignmentKey)
+            .flatMap(LyricsTextAlignment.init(rawValue:)) ?? LyricsTextAlignment.defaultValue
+        let persistentDefaults = defaults.persistentDomain(forName: Bundle.main.bundleIdentifier ?? appIdentifier) ?? [:]
+        let legacyDynamicIslandShapeRatio = Self.clampedDynamicIslandLyricsRatio(defaults.double(forKey: dynamicIslandLyricsBottomRatioKey))
+        let dynamicIslandSlantRatio = Self.clampedDynamicIslandLyricsRatio(
+            Self.persistedDouble(in: persistentDefaults, forKey: dynamicIslandLyricsSlantRatioKey) ?? legacyDynamicIslandShapeRatio
+        )
+        let dynamicIslandCornerRatio = Self.clampedDynamicIslandLyricsRatio(
+            Self.persistedDouble(in: persistentDefaults, forKey: dynamicIslandLyricsCornerRatioKey) ?? legacyDynamicIslandShapeRatio
+        )
 
         return AppSettings(
             isCapsLockIndicatorEnabled: defaults.bool(forKey: capsLockIndicatorEnabledKey),
@@ -164,6 +358,38 @@ final class SettingsStore {
             screenshotCopiesToClipboard: defaults.bool(forKey: screenshotCopiesToClipboardKey),
             screenshotSelectsRegion: defaults.bool(forKey: screenshotSelectsRegionKey),
             isActiveVisionEnabled: defaults.bool(forKey: activeVisionEnabledKey),
+            isDesktopLyricsEnabled: defaults.bool(forKey: desktopLyricsEnabledKey),
+            isDesktopLyricsSurfaceEnabled: defaults.bool(forKey: desktopLyricsSurfaceEnabledKey),
+            desktopLyricsWidth: Self.clampedDesktopLyricsWidth(defaults.double(forKey: desktopLyricsWidthKey)),
+            desktopLyricsAlignment: desktopLyricsAlignment,
+            isDynamicIslandLyricsEnabled: defaults.bool(forKey: dynamicIslandLyricsEnabledKey),
+            dynamicIslandLyricsWidth: Self.clampedDynamicIslandLyricsWidth(defaults.double(forKey: dynamicIslandLyricsWidthKey)),
+            dynamicIslandLyricsBlankWidth: Self.clampedDynamicIslandLyricsBlankWidth(defaults.double(forKey: dynamicIslandLyricsBlankWidthKey)),
+            dynamicIslandLyricsHeight: Self.clampedDynamicIslandLyricsHeight(defaults.double(forKey: dynamicIslandLyricsHeightKey)),
+            dynamicIslandLyricsSlantRatio: dynamicIslandSlantRatio,
+            dynamicIslandLyricsCornerRatio: dynamicIslandCornerRatio,
+            dynamicIslandLyricsFontSize: Self.clampedDynamicIslandLyricsFontSize(defaults.double(forKey: dynamicIslandLyricsFontSizeKey)),
+            dynamicIslandLyricsFontName: defaults.string(forKey: dynamicIslandLyricsFontNameKey) ?? "",
+            isDynamicIslandLyricsSpectrumEnabled: defaults.bool(forKey: dynamicIslandLyricsSpectrumEnabledKey),
+            isDynamicIslandLyricsHidesOnHover: defaults.bool(forKey: dynamicIslandLyricsHidesOnHoverKey),
+            isMenuBarLyricsEnabled: defaults.bool(forKey: menuBarLyricsEnabledKey),
+            menuBarLyricsWidth: Self.clampedMenuBarLyricsWidth(defaults.double(forKey: menuBarLyricsWidthKey)),
+            menuBarLyricsAlignment: menuBarLyricsAlignment,
+            enabledDesktopLyricsSources: enabledSources,
+            desktopLyricsSourceOrder: desktopLyricsSourceOrder,
+            desktopLyricsPreferredLanguage: preferredLanguage,
+            desktopLyricsShowsTranslation: defaults.bool(forKey: desktopLyricsShowsTranslationKey),
+            desktopLyricsFontSize: Self.clampedDesktopLyricsFontSize(defaults.double(forKey: desktopLyricsFontSizeKey)),
+            desktopLyricsFontName: defaults.string(forKey: desktopLyricsFontNameKey) ?? "",
+            desktopLyricsTextColor: defaults.string(forKey: desktopLyricsTextColorKey) ?? "",
+            desktopLyricsStrokeColor: defaults.string(forKey: desktopLyricsStrokeColorKey) ?? "",
+            desktopLyricsStrokeWidth: defaults.double(forKey: desktopLyricsStrokeWidthKey),
+            desktopLyricsPositionX: defaults.double(forKey: desktopLyricsPositionXKey),
+            desktopLyricsPositionY: defaults.double(forKey: desktopLyricsPositionYKey),
+            desktopLyricsLocked: defaults.bool(forKey: desktopLyricsLockedKey),
+            desktopLyricsStylePreset: stylePreset,
+            musicLyricsAppWhitelist: defaults.string(forKey: musicLyricsAppWhitelistKey) ?? "",
+            appleMusicMediaUserToken: defaults.string(forKey: appleMusicMediaUserTokenKey) ?? "",
             activeVisionPreventsDisplaySleepOnGaze: defaults.bool(forKey: activeVisionPreventDisplaySleepOnGazeKey),
             activeVisionPreventsDisplaySleepOnFacing: defaults.bool(forKey: activeVisionPreventDisplaySleepOnFacingKey),
             activeVisionNotifiesWhenExtendingDisplaySleep: defaults.bool(forKey: activeVisionNotifyWhenExtendingDisplaySleepKey)
@@ -208,6 +434,152 @@ final class SettingsStore {
 
     func setActiveVisionEnabled(_ isEnabled: Bool) {
         defaults.set(isEnabled, forKey: activeVisionEnabledKey)
+    }
+
+    func setDesktopLyricsEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: desktopLyricsEnabledKey)
+    }
+
+    func setDesktopLyricsSurfaceEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: desktopLyricsSurfaceEnabledKey)
+    }
+
+    func setDesktopLyricsWidth(_ width: Double) {
+        defaults.set(Self.clampedDesktopLyricsWidth(width), forKey: desktopLyricsWidthKey)
+    }
+
+    func setDesktopLyricsAlignment(_ alignment: LyricsTextAlignment) {
+        defaults.set(alignment.rawValue, forKey: desktopLyricsAlignmentKey)
+    }
+
+    func setDynamicIslandLyricsEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: dynamicIslandLyricsEnabledKey)
+    }
+
+    func setDynamicIslandLyricsWidth(_ width: Double) {
+        defaults.set(Self.clampedDynamicIslandLyricsWidth(width), forKey: dynamicIslandLyricsWidthKey)
+    }
+
+    func setDynamicIslandLyricsBlankWidth(_ width: Double) {
+        defaults.set(Self.clampedDynamicIslandLyricsBlankWidth(width), forKey: dynamicIslandLyricsBlankWidthKey)
+    }
+
+    func setDynamicIslandLyricsHeight(_ height: Double) {
+        defaults.set(Self.clampedDynamicIslandLyricsHeight(height), forKey: dynamicIslandLyricsHeightKey)
+    }
+
+    func setDynamicIslandLyricsSlantRatio(_ ratio: Double) {
+        defaults.set(Self.clampedDynamicIslandLyricsRatio(ratio), forKey: dynamicIslandLyricsSlantRatioKey)
+    }
+
+    func setDynamicIslandLyricsCornerRatio(_ ratio: Double) {
+        defaults.set(Self.clampedDynamicIslandLyricsRatio(ratio), forKey: dynamicIslandLyricsCornerRatioKey)
+    }
+
+    func setDynamicIslandLyricsFontSize(_ fontSize: Double) {
+        defaults.set(Self.clampedDynamicIslandLyricsFontSize(fontSize), forKey: dynamicIslandLyricsFontSizeKey)
+    }
+
+    func setDynamicIslandLyricsFontName(_ fontName: String) {
+        defaults.set(fontName, forKey: dynamicIslandLyricsFontNameKey)
+    }
+
+    func setDynamicIslandLyricsSpectrumEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: dynamicIslandLyricsSpectrumEnabledKey)
+    }
+
+    func setDynamicIslandLyricsHidesOnHover(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: dynamicIslandLyricsHidesOnHoverKey)
+    }
+
+    func setMenuBarLyricsEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: menuBarLyricsEnabledKey)
+    }
+
+    func setMenuBarLyricsWidth(_ width: Double) {
+        defaults.set(Self.clampedMenuBarLyricsWidth(width), forKey: menuBarLyricsWidthKey)
+    }
+
+    func setMenuBarLyricsAlignment(_ alignment: LyricsTextAlignment) {
+        defaults.set(alignment.rawValue, forKey: menuBarLyricsAlignmentKey)
+    }
+
+    func setDesktopLyricsSource(_ source: DesktopLyricsSource, enabled isEnabled: Bool) {
+        var sources = read().enabledDesktopLyricsSources
+        if isEnabled, !sources.contains(source) {
+            sources.append(source)
+        } else if !isEnabled {
+            sources.removeAll { $0 == source }
+        }
+        defaults.set(sources.map(\.rawValue), forKey: "EnabledDesktopLyricsSources")
+    }
+
+    func setAppleMusicMediaUserToken(_ token: String) {
+        defaults.set(token, forKey: appleMusicMediaUserTokenKey)
+    }
+
+    func setDesktopLyricsPreferredLanguage(_ language: DesktopLyricsPreferredLanguage) {
+        defaults.set(language.rawValue, forKey: desktopLyricsPreferredLanguageKey)
+    }
+
+    func setDesktopLyricsShowsTranslation(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: desktopLyricsShowsTranslationKey)
+    }
+
+    func setDesktopLyricsFontSize(_ fontSize: Double) {
+        defaults.set(Self.clampedDesktopLyricsFontSize(fontSize), forKey: desktopLyricsFontSizeKey)
+    }
+
+    func setDesktopLyricsFontName(_ fontName: String) {
+        defaults.set(fontName, forKey: desktopLyricsFontNameKey)
+    }
+
+    func setDesktopLyricsTextColor(_ value: String) {
+        defaults.set(value, forKey: desktopLyricsTextColorKey)
+    }
+
+    func setDesktopLyricsStrokeColor(_ value: String) {
+        defaults.set(value, forKey: desktopLyricsStrokeColorKey)
+    }
+
+    func setDesktopLyricsStrokeWidth(_ value: Double) {
+        defaults.set(max(0.0, min(6.0, value)), forKey: desktopLyricsStrokeWidthKey)
+    }
+
+    func setDesktopLyricsPosition(x: Double, y: Double) {
+        defaults.set(x, forKey: desktopLyricsPositionXKey)
+        defaults.set(y, forKey: desktopLyricsPositionYKey)
+    }
+
+    func setDesktopLyricsLocked(_ isLocked: Bool) {
+        defaults.set(isLocked, forKey: desktopLyricsLockedKey)
+    }
+
+    func setDesktopLyricsStylePreset(_ preset: DesktopLyricsStylePreset) {
+        defaults.set(preset.rawValue, forKey: desktopLyricsStylePresetKey)
+        defaults.set("", forKey: desktopLyricsTextColorKey)
+        defaults.set("", forKey: desktopLyricsStrokeColorKey)
+        defaults.set(-1.0, forKey: desktopLyricsStrokeWidthKey)
+    }
+
+    func setMusicLyricsAppWhitelist(_ value: String) {
+        defaults.set(value, forKey: musicLyricsAppWhitelistKey)
+    }
+
+    func moveDesktopLyricsSource(_ source: DesktopLyricsSource, direction: Int) {
+        var order = read().desktopLyricsSourceOrder
+        guard let index = order.firstIndex(of: source) else {
+            return
+        }
+
+        let newIndex = max(0, min(order.count - 1, index + direction))
+        guard newIndex != index else {
+            return
+        }
+
+        order.remove(at: index)
+        order.insert(source, at: newIndex)
+        defaults.set(order.map(\.rawValue), forKey: desktopLyricsSourceOrderKey)
     }
 
     func setActiveVisionPreventsDisplaySleepOnGaze(_ isEnabled: Bool) {
@@ -257,5 +629,64 @@ final class SettingsStore {
 
         return result
     }
-}
 
+    private func normalizedDesktopLyricsSourceOrder(_ savedOrder: [DesktopLyricsSource]) -> [DesktopLyricsSource] {
+        var result: [DesktopLyricsSource] = []
+
+        for source in savedOrder where !result.contains(source) {
+            result.append(source)
+        }
+
+        for source in DesktopLyricsSource.defaultOrder where !result.contains(source) {
+            result.append(source)
+        }
+
+        return result
+    }
+
+    private func normalizedEnabledDesktopLyricsSources(_ savedSources: [DesktopLyricsSource]) -> [DesktopLyricsSource] {
+        savedSources.filter { DesktopLyricsSource.defaultOrder.contains($0) }
+    }
+
+    private static func persistedDouble(in dictionary: [String: Any], forKey key: String) -> Double? {
+        if let value = dictionary[key] as? Double {
+            return value
+        }
+        if let value = dictionary[key] as? NSNumber {
+            return value.doubleValue
+        }
+        return nil
+    }
+
+    private static func clampedDesktopLyricsFontSize(_ value: Double) -> Double {
+        min(48.0, max(18.0, value == 0 ? 28.0 : value))
+    }
+
+    private static func clampedDesktopLyricsWidth(_ value: Double) -> Double {
+        min(2200.0, max(260.0, value == 0 ? 980.0 : value))
+    }
+
+    private static func clampedDynamicIslandLyricsWidth(_ value: Double) -> Double {
+        min(1700.0, max(360.0, value == 0 ? 900.0 : value))
+    }
+
+    private static func clampedDynamicIslandLyricsBlankWidth(_ value: Double) -> Double {
+        min(900.0, max(60.0, value == 0 ? 210.0 : value))
+    }
+
+    private static func clampedDynamicIslandLyricsHeight(_ value: Double) -> Double {
+        min(180.0, max(32.0, value == 0 ? 58.0 : value))
+    }
+
+    private static func clampedDynamicIslandLyricsRatio(_ value: Double) -> Double {
+        min(1.0, max(0.01, value == 0 ? 0.55 : value))
+    }
+
+    private static func clampedDynamicIslandLyricsFontSize(_ value: Double) -> Double {
+        min(64.0, max(11.0, value == 0 ? 15.0 : value))
+    }
+
+    private static func clampedMenuBarLyricsWidth(_ value: Double) -> Double {
+        min(760.0, max(40.0, value == 0 ? 220.0 : value))
+    }
+}

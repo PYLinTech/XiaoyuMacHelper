@@ -46,8 +46,14 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <true/>
   <key>NSCameraUsageDescription</key>
   <string>主动视觉感知将在您息屏前使用摄像头进行本地分析，不会存储任何您的信息。</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>灵动大陆的真实频谱需要临时监听系统播放音频，只用于本地可视化，不会录制、保存或上传音频。</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>灵动大陆的真实频谱需要临时监听系统播放音频，只用于本地可视化，不会录制、保存或上传音频。</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSPrefersDisplaySafeAreaCompatibilityMode</key>
+  <false/>
 </dict>
 </plist>
 PLIST

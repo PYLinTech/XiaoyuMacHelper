@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 @preconcurrency import ApplicationServices
 import ServiceManagement
 
@@ -108,6 +109,10 @@ enum SystemSettingsOpener {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
     }
 
+    static func openScreenRecordingPrivacy() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+    }
+
     private static func open(_ urlString: String) {
         guard let url = URL(string: urlString) else { return }
         NSWorkspace.shared.open(url)
@@ -126,6 +131,21 @@ enum AccessibilityPermission {
 
     static func openSettings() {
         SystemSettingsOpener.openAccessibility()
+    }
+}
+
+enum ScreenRecordingPermission {
+    static var isAuthorized: Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    @discardableResult
+    static func request() -> Bool {
+        CGRequestScreenCaptureAccess()
+    }
+
+    static func openSettings() {
+        SystemSettingsOpener.openScreenRecordingPrivacy()
     }
 }
 

@@ -240,9 +240,11 @@ final class SelectionToolbarController {
         }
 
         let saveDirectory = currentSettings.screenshotSaveDirectory
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try Self.saveScreenshot(image, toDirectoryAt: saveDirectory) }
-            DispatchQueue.main.async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [image, saveDirectory, weak self] in
+            let result = Result {
+                try SelectionToolbarController.saveScreenshot(image, toDirectoryAt: saveDirectory)
+            }
+            DispatchQueue.main.async {
                 guard let self else { return }
                 switch result {
                 case .success(let url):

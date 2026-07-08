@@ -8,7 +8,7 @@ RELEASE_DIR="$ROOT_DIR/release"
 STAGING_DIR="$ROOT_DIR/.release-staging"
 
 DEFAULT_APP_VERSION="${APP_VERSION:-1.0}"
-DEFAULT_APP_BUILD="${APP_BUILD:-1}"
+DEFAULT_APP_BUILD="${APP_BUILD:-$(date +%y%m%d%H%M)}"
 
 if [[ $# -ge 1 ]]; then
   APP_VERSION="$1"
@@ -70,11 +70,10 @@ fi
 ditto "$APP_DIR" "$STAGING_DIR/$APP_NAME.app"
 ln -s /Applications "$STAGING_DIR/Applications"
 
-hdiutil create \
-  -volname "$APP_NAME" \
-  -srcfolder "$STAGING_DIR" \
-  -ov \
-  -format UDZO \
+diskutil image create from \
+  --volumeName "$APP_NAME" \
+  --format UDZO \
+  "$STAGING_DIR" \
   "$DMG_PATH"
 
 rm -rf "$STAGING_DIR"
@@ -99,4 +98,6 @@ elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_PASSWOR
   xcrun stapler staple "$DMG_PATH"
 fi
 
+rm -rf "$ROOT_DIR/dist"
+echo "Cleaned: $ROOT_DIR/dist"
 echo "Release DMG: $DMG_PATH"

@@ -20,11 +20,10 @@ class FloatingOverlayPanel: NSPanel {
         hidesOnDeactivate = false
         canHide = false
         level = .floating
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .stationary]
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
         ignoresMouseEvents = false
     }
 }
-

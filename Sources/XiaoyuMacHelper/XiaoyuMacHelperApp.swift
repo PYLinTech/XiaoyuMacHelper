@@ -19,6 +19,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private let capsLockWindow = CapsLockWindow()
     private lazy var selectionToolbarController = SelectionToolbarController(settings: currentSettings)
     private lazy var activeVisionController = ActiveVisionController(settings: currentSettings)
+    private lazy var desktopLyricsController = DesktopLyricsController(settings: currentSettings)
     private lazy var controlWindow = ControlWindow()
     private var pollTimer: Timer?
     private var statusPollTimer: Timer?
@@ -26,6 +27,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private var globalFlagsMonitor: Any?
     private var localFlagsMonitor: Any?
     private var didBecomeActiveObserver: NSObjectProtocol?
+    private var appleMusicTokenLoginWindow: AppleMusicTokenLoginWindow?
     private var lastRenderedControlState: ControlState?
     private var previousCapsLockState: Bool?
 
@@ -41,6 +43,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         setupObservers()
         selectionToolbarController.start()
         activeVisionController.start()
+        desktopLyricsController.start()
         updateCapsLockPolling()
         updateCapsLockWindow(force: true)
         if launchMode.showsControlWindowOnLaunch {
@@ -54,8 +57,37 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.onClickToDisableChanged = { [weak self] isEnabled in self?.setClickToDisableEnabled(isEnabled) }
         controlWindow.onSelectionToolbarChanged = { [weak self] isEnabled in self?.setSelectionToolbarEnabled(isEnabled) }
         controlWindow.onActiveVisionChanged = { [weak self] isEnabled in self?.setActiveVisionEnabled(isEnabled) }
+        controlWindow.onDesktopLyricsChanged = { [weak self] isEnabled in self?.setDesktopLyricsEnabled(isEnabled) }
         controlWindow.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.setSelectionToolbarAction(action, enabled: isEnabled) }
         controlWindow.onSelectionToolbarActionMoved = { [weak self] action, direction in self?.moveSelectionToolbarAction(action, direction: direction) }
+        controlWindow.onDesktopLyricsSourceMoved = { [weak self] source, direction in self?.moveDesktopLyricsSource(source, direction: direction) }
+        controlWindow.onDesktopLyricsSourceEnabledChanged = { [weak self] source, isEnabled in self?.setDesktopLyricsSource(source, enabled: isEnabled) }
+        controlWindow.onDesktopLyricsPreferredLanguageChanged = { [weak self] language in self?.setDesktopLyricsPreferredLanguage(language) }
+        controlWindow.onDesktopLyricsSurfaceChanged = { [weak self] isEnabled in self?.setDesktopLyricsSurfaceEnabled(isEnabled) }
+        controlWindow.onDynamicIslandLyricsChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsEnabled(isEnabled) }
+        controlWindow.onDynamicIslandLyricsSpectrumChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsSpectrumEnabled(isEnabled) }
+        controlWindow.onDynamicIslandLyricsHideOnHoverChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsHideOnHover(isEnabled) }
+        controlWindow.onDesktopLyricsWidthChanged = { [weak self] width in self?.setDesktopLyricsWidth(width) }
+        controlWindow.onDesktopLyricsAlignmentChanged = { [weak self] alignment in self?.setDesktopLyricsAlignment(alignment) }
+        controlWindow.onDynamicIslandLyricsWidthChanged = { [weak self] width in self?.setDynamicIslandLyricsWidth(width) }
+        controlWindow.onDynamicIslandLyricsBlankWidthChanged = { [weak self] width in self?.setDynamicIslandLyricsBlankWidth(width) }
+        controlWindow.onDynamicIslandLyricsHeightChanged = { [weak self] height in self?.setDynamicIslandLyricsHeight(height) }
+        controlWindow.onDynamicIslandLyricsSlantRatioChanged = { [weak self] ratio in self?.setDynamicIslandLyricsSlantRatio(ratio) }
+        controlWindow.onDynamicIslandLyricsCornerRatioChanged = { [weak self] ratio in self?.setDynamicIslandLyricsCornerRatio(ratio) }
+        controlWindow.onDynamicIslandLyricsFontSizeChanged = { [weak self] fontSize in self?.setDynamicIslandLyricsFontSize(fontSize) }
+        controlWindow.onDynamicIslandLyricsFontNameChanged = { [weak self] fontName in self?.setDynamicIslandLyricsFontName(fontName) }
+        controlWindow.onMenuBarLyricsChanged = { [weak self] isEnabled in self?.setMenuBarLyricsEnabled(isEnabled) }
+        controlWindow.onMenuBarLyricsWidthChanged = { [weak self] width in self?.setMenuBarLyricsWidth(width) }
+        controlWindow.onMenuBarLyricsAlignmentChanged = { [weak self] alignment in self?.setMenuBarLyricsAlignment(alignment) }
+        controlWindow.onDesktopLyricsShowsTranslationChanged = { [weak self] isEnabled in self?.setDesktopLyricsShowsTranslation(isEnabled) }
+        controlWindow.onDesktopLyricsFontSizeChanged = { [weak self] fontSize in self?.setDesktopLyricsFontSize(fontSize) }
+        controlWindow.onDesktopLyricsLockedChanged = { [weak self] isLocked in self?.setDesktopLyricsLocked(isLocked) }
+        controlWindow.onDesktopLyricsStylePresetChanged = { [weak self] preset in self?.setDesktopLyricsStylePreset(preset) }
+        controlWindow.onDesktopLyricsFontNameChanged = { [weak self] fontName in self?.setDesktopLyricsFontName(fontName) }
+        controlWindow.onDesktopLyricsTextColorChanged = { [weak self] value in self?.setDesktopLyricsTextColor(value) }
+        controlWindow.onDesktopLyricsStrokeColorChanged = { [weak self] value in self?.setDesktopLyricsStrokeColor(value) }
+        controlWindow.onDesktopLyricsStrokeWidthChanged = { [weak self] value in self?.setDesktopLyricsStrokeWidth(value) }
+        controlWindow.onMusicLyricsAppWhitelistChanged = { [weak self] value in self?.setMusicLyricsAppWhitelist(value) }
         controlWindow.onSearchTemplateChanged = { [weak self] template in self?.setSearchURLTemplate(template) }
         controlWindow.onScreenshotSaveDirectoryChanged = { [weak self] path in self?.setScreenshotSaveDirectory(path) }
         controlWindow.onScreenshotCopiesToClipboardChanged = { [weak self] isEnabled in self?.setScreenshotCopiesToClipboard(isEnabled) }
@@ -63,6 +95,8 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.onActiveVisionGazeChanged = { [weak self] isEnabled in self?.setActiveVisionPreventsDisplaySleepOnGaze(isEnabled) }
         controlWindow.onActiveVisionFacingChanged = { [weak self] isEnabled in self?.setActiveVisionPreventsDisplaySleepOnFacing(isEnabled) }
         controlWindow.onActiveVisionNotifyChanged = { [weak self] isEnabled in self?.setActiveVisionNotifyWhenExtendingDisplaySleep(isEnabled) }
+        controlWindow.onAppleMusicLoginRequested = { [weak self] in self?.openAppleMusicLogin() }
+        controlWindow.onAppleMusicTokenCleared = { [weak self] in self?.clearAppleMusicToken() }
         controlWindow.onLoginItemChanged = { [weak self] isEnabled in self?.setLoginItemEnabled(isEnabled) }
         controlWindow.onLoginItemGuide = { [weak self] in self?.openLoginItemSettings() }
         controlWindow.onAccessibilityEnableRequested = { [weak self] in self?.enableAccessibilityGuide() }
@@ -73,6 +107,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.onHidden = { [weak self] in self?.stopStatusPolling() }
         controlWindow.onClearDataAndQuit = { [weak self] in self?.clearDataAndQuit() }
         controlWindow.onQuit = { NSApp.terminate(nil) }
+        desktopLyricsController.onPositionChanged = { [weak self] origin in self?.setDesktopLyricsPosition(origin) }
     }
 
     private func clearDataAndQuit() {
@@ -94,6 +129,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         stopStatusPolling()
         selectionToolbarController.stop()
         activeVisionController.stop()
+        desktopLyricsController.stop()
         instanceLock.releaseLock()
     }
 
@@ -346,7 +382,300 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         activeVisionController.update(settings: currentSettings)
     }
 
+    private func setDesktopLyricsEnabled(_ isEnabled: Bool) {
+        settingsStore.setDesktopLyricsEnabled(isEnabled)
+        currentSettings.isDesktopLyricsEnabled = isEnabled
+        refreshDesktopLyricsSettings()
+    }
+
+    private func openAppleMusicLogin() {
+        let loginWindow = AppleMusicTokenLoginWindow()
+        loginWindow.onTokenCaptured = { [weak self] token in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.settingsStore.setAppleMusicMediaUserToken(token)
+                self.currentSettings.appleMusicMediaUserToken = token
+                self.appleMusicTokenLoginWindow = nil
+                self.refreshDesktopLyricsSettings()
+                AlertPresenter.show(
+                    title: "Apple Music 已登录",
+                    message: "已保存网页登录凭据，桌面歌词会按您设置的来源顺序尝试获取 Apple Music 歌词。"
+                )
+            }
+        }
+        appleMusicTokenLoginWindow = loginWindow
+        loginWindow.show()
+    }
+
+    private func clearAppleMusicToken() {
+        settingsStore.setAppleMusicMediaUserToken("")
+        currentSettings.appleMusicMediaUserToken = ""
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsPreferredLanguage(_ language: DesktopLyricsPreferredLanguage) {
+        settingsStore.setDesktopLyricsPreferredLanguage(language)
+        currentSettings.desktopLyricsPreferredLanguage = language
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsSurfaceEnabled(_ isEnabled: Bool) {
+        settingsStore.setDesktopLyricsSurfaceEnabled(isEnabled)
+        currentSettings.isDesktopLyricsSurfaceEnabled = isEnabled
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsEnabled(_ isEnabled: Bool) {
+        settingsStore.setDynamicIslandLyricsEnabled(isEnabled)
+        currentSettings.isDynamicIslandLyricsEnabled = isEnabled
+        if !isEnabled {
+            settingsStore.setDynamicIslandLyricsSpectrumEnabled(false)
+            currentSettings.isDynamicIslandLyricsSpectrumEnabled = false
+        }
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsSpectrumEnabled(_ isEnabled: Bool) {
+        if isEnabled {
+            let hasPermission = SystemAudioSpectrumMonitor.hasCapturePermission() || SystemAudioSpectrumMonitor.requestCapturePermission()
+            guard hasPermission else {
+                settingsStore.setDynamicIslandLyricsSpectrumEnabled(false)
+                currentSettings.isDynamicIslandLyricsSpectrumEnabled = false
+                refreshDesktopLyricsSettings()
+                showAudioCapturePermissionAlert()
+                return
+            }
+        }
+        settingsStore.setDynamicIslandLyricsSpectrumEnabled(isEnabled)
+        currentSettings.isDynamicIslandLyricsSpectrumEnabled = isEnabled
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsHideOnHover(_ isEnabled: Bool) {
+        settingsStore.setDynamicIslandLyricsHidesOnHover(isEnabled)
+        currentSettings.isDynamicIslandLyricsHidesOnHover = isEnabled
+        refreshDesktopLyricsSettings()
+    }
+
+    private func showAudioCapturePermissionAlert() {
+        let alert = NSAlert()
+        alert.messageText = "需要允许屏幕与系统音频录制"
+        alert.informativeText = "灵动大陆可视化频谱需要 macOS 的录音/屏幕与系统音频录制权限。请在系统设置中允许 Xiaoyu MacHelper 后重新勾选。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "打开系统设置")
+        alert.addButton(withTitle: "稍后")
+        if alert.runModal() == .alertFirstButtonReturn,
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func setDesktopLyricsWidth(_ width: Double) {
+        settingsStore.setDesktopLyricsWidth(width)
+        currentSettings.desktopLyricsWidth = min(2200.0, max(260.0, width))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsAlignment(_ alignment: LyricsTextAlignment) {
+        settingsStore.setDesktopLyricsAlignment(alignment)
+        currentSettings.desktopLyricsAlignment = alignment
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsWidth(_ width: Double) {
+        settingsStore.setDynamicIslandLyricsWidth(width)
+        currentSettings.dynamicIslandLyricsWidth = min(1700.0, max(360.0, width))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsBlankWidth(_ width: Double) {
+        settingsStore.setDynamicIslandLyricsBlankWidth(width)
+        currentSettings.dynamicIslandLyricsBlankWidth = min(900.0, max(60.0, width))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsHeight(_ height: Double) {
+        settingsStore.setDynamicIslandLyricsHeight(height)
+        currentSettings.dynamicIslandLyricsHeight = min(180.0, max(32.0, height))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsSlantRatio(_ ratio: Double) {
+        settingsStore.setDynamicIslandLyricsSlantRatio(ratio)
+        currentSettings.dynamicIslandLyricsSlantRatio = min(1.0, max(0.01, ratio))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsCornerRatio(_ ratio: Double) {
+        settingsStore.setDynamicIslandLyricsCornerRatio(ratio)
+        currentSettings.dynamicIslandLyricsCornerRatio = min(1.0, max(0.01, ratio))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsFontSize(_ fontSize: Double) {
+        let previousFontSize = currentSettings.dynamicIslandLyricsFontSize
+        let clampedFontSize = min(64.0, max(11.0, fontSize))
+        settingsStore.setDynamicIslandLyricsFontSize(clampedFontSize)
+        currentSettings.dynamicIslandLyricsFontSize = clampedFontSize
+
+        // When the user makes 灵动大陆 text much larger, lift the saved height once so the
+        // enlarged text has enough room immediately.  This is intentionally not a hard clamp:
+        // changing the height slider afterwards still stores the smaller height and will not be
+        // pushed back up until the font size is increased again.
+        if clampedFontSize > previousFontSize + 0.25 {
+            let suggestedHeight = Self.suggestedDynamicIslandLyricsHeight(forFontSize: clampedFontSize)
+            if currentSettings.dynamicIslandLyricsHeight + 0.5 < suggestedHeight {
+                settingsStore.setDynamicIslandLyricsHeight(suggestedHeight)
+                currentSettings.dynamicIslandLyricsHeight = suggestedHeight
+            }
+        }
+
+        refreshDesktopLyricsSettings()
+    }
+
+    private static func suggestedDynamicIslandLyricsHeight(forFontSize fontSize: Double) -> Double {
+        let clampedFontSize = min(64.0, max(11.0, fontSize))
+        guard clampedFontSize > 24.0 else { return 58.0 }
+        return min(180.0, max(58.0, ceil(58.0 + (clampedFontSize - 24.0) * 1.55)))
+    }
+
+    private func setDynamicIslandLyricsFontName(_ fontName: String) {
+        settingsStore.setDynamicIslandLyricsFontName(fontName)
+        currentSettings.dynamicIslandLyricsFontName = fontName
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setMenuBarLyricsEnabled(_ isEnabled: Bool) {
+        settingsStore.setMenuBarLyricsEnabled(isEnabled)
+        currentSettings.isMenuBarLyricsEnabled = isEnabled
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setMenuBarLyricsWidth(_ width: Double) {
+        settingsStore.setMenuBarLyricsWidth(width)
+        currentSettings.menuBarLyricsWidth = min(760.0, max(40.0, width))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setMenuBarLyricsAlignment(_ alignment: LyricsTextAlignment) {
+        settingsStore.setMenuBarLyricsAlignment(alignment)
+        currentSettings.menuBarLyricsAlignment = alignment
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsShowsTranslation(_ isEnabled: Bool) {
+        settingsStore.setDesktopLyricsShowsTranslation(isEnabled)
+        currentSettings.desktopLyricsShowsTranslation = isEnabled
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsFontSize(_ fontSize: Double) {
+        settingsStore.setDesktopLyricsFontSize(fontSize)
+        currentSettings.desktopLyricsFontSize = min(48.0, max(18.0, fontSize))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsLocked(_ isLocked: Bool) {
+        settingsStore.setDesktopLyricsLocked(isLocked)
+        currentSettings.desktopLyricsLocked = isLocked
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsStylePreset(_ preset: DesktopLyricsStylePreset) {
+        settingsStore.setDesktopLyricsStylePreset(preset)
+        currentSettings.desktopLyricsStylePreset = preset
+        currentSettings.desktopLyricsTextColor = ""
+        currentSettings.desktopLyricsStrokeColor = ""
+        currentSettings.desktopLyricsStrokeWidth = -1.0
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsFontName(_ fontName: String) {
+        settingsStore.setDesktopLyricsFontName(fontName)
+        currentSettings.desktopLyricsFontName = fontName
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsTextColor(_ value: String) {
+        settingsStore.setDesktopLyricsTextColor(value)
+        currentSettings.desktopLyricsTextColor = value
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsStrokeColor(_ value: String) {
+        settingsStore.setDesktopLyricsStrokeColor(value)
+        currentSettings.desktopLyricsStrokeColor = value
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsStrokeWidth(_ value: Double) {
+        settingsStore.setDesktopLyricsStrokeWidth(value)
+        currentSettings.desktopLyricsStrokeWidth = max(0.0, min(6.0, value))
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setMusicLyricsAppWhitelist(_ value: String) {
+        settingsStore.setMusicLyricsAppWhitelist(value)
+        currentSettings.musicLyricsAppWhitelist = value
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsPosition(_ origin: NSPoint) {
+        settingsStore.setDesktopLyricsPosition(x: Double(origin.x), y: Double(origin.y))
+        currentSettings.desktopLyricsPositionX = Double(origin.x)
+        currentSettings.desktopLyricsPositionY = Double(origin.y)
+    }
+
+    private func refreshDesktopLyricsSettings() {
+        renderControlWindow(force: true)
+        desktopLyricsController.update(settings: currentSettings)
+    }
+
     private func setSelectionToolbarAction(_ action: ToolbarAction, enabled isEnabled: Bool) {
+        guard action == .screenshot else {
+            applySelectionToolbarAction(action, enabled: isEnabled)
+            return
+        }
+
+        setScreenshotActionEnabled(isEnabled)
+    }
+
+    private func setScreenshotActionEnabled(_ isEnabled: Bool) {
+        guard isEnabled else {
+            applySelectionToolbarAction(.screenshot, enabled: false)
+            return
+        }
+
+        guard ScreenRecordingPermission.isAuthorized else {
+            applySelectionToolbarAction(.screenshot, enabled: false)
+            AlertPresenter.show(
+                title: "需要录屏权限",
+                message: "截图功能需要屏幕录制权限才能读取屏幕内容。点击“知道了”后将向系统申请权限。",
+                style: .warning
+            )
+
+            if ScreenRecordingPermission.request() {
+                applySelectionToolbarAction(.screenshot, enabled: true)
+            } else {
+                applySelectionToolbarAction(.screenshot, enabled: false)
+                let response = AlertPresenter.show(
+                    title: "无法开启截图",
+                    message: "请在系统设置的“隐私与安全性 > 屏幕录制”中允许 Xiaoyu MacHelper，然后重新勾选截图。",
+                    style: .warning,
+                    buttons: ["打开设置", "取消"]
+                )
+
+                if response == .alertFirstButtonReturn {
+                    ScreenRecordingPermission.openSettings()
+                }
+            }
+            return
+        }
+
+        applySelectionToolbarAction(.screenshot, enabled: true)
+    }
+
+    private func applySelectionToolbarAction(_ action: ToolbarAction, enabled isEnabled: Bool) {
         settingsStore.setSelectionToolbarAction(action, enabled: isEnabled)
         currentSettings.setSelectionToolbarAction(action, enabled: isEnabled)
         refreshSelectionToolbarSettings()
@@ -356,6 +685,18 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         settingsStore.moveSelectionToolbarAction(action, direction: direction)
         currentSettings = settingsStore.read()
         refreshSelectionToolbarSettings()
+    }
+
+    private func moveDesktopLyricsSource(_ source: DesktopLyricsSource, direction: Int) {
+        settingsStore.moveDesktopLyricsSource(source, direction: direction)
+        currentSettings = settingsStore.read()
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDesktopLyricsSource(_ source: DesktopLyricsSource, enabled isEnabled: Bool) {
+        settingsStore.setDesktopLyricsSource(source, enabled: isEnabled)
+        currentSettings = settingsStore.read()
+        refreshDesktopLyricsSettings()
     }
 
     private func setSearchURLTemplate(_ template: String) {
@@ -493,4 +834,3 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         return connection
     }
 }
-
