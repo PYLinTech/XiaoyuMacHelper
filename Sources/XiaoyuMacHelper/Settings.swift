@@ -191,6 +191,7 @@ struct AppSettings: Equatable, Sendable {
     var dynamicIslandLyricsCornerRatio: Double
     var dynamicIslandLyricsFontSize: Double
     var dynamicIslandLyricsFontName: String
+    var dynamicIslandLyricsAlignment: LyricsTextAlignment
     var isDynamicIslandLyricsSpectrumEnabled: Bool
     var isDynamicIslandLyricsHidesOnHover: Bool
     var isMenuBarLyricsEnabled: Bool
@@ -289,6 +290,7 @@ final class SettingsStore {
             dynamicIslandLyricsCornerRatioKey: 0.55,
             dynamicIslandLyricsFontSizeKey: 15.0,
             dynamicIslandLyricsFontNameKey: "",
+            dynamicIslandLyricsAlignmentKey: LyricsTextAlignment.defaultValue.rawValue,
             dynamicIslandLyricsSpectrumEnabledKey: false,
             dynamicIslandLyricsHidesOnHoverKey: false,
             menuBarLyricsEnabledKey: false,
@@ -333,6 +335,8 @@ final class SettingsStore {
             .flatMap(DesktopLyricsStylePreset.init(rawValue:)) ?? DesktopLyricsStylePreset.defaultValue
         let desktopLyricsAlignment = defaults.string(forKey: desktopLyricsAlignmentKey)
             .flatMap(LyricsTextAlignment.init(rawValue:)) ?? LyricsTextAlignment.defaultValue
+        let dynamicIslandLyricsAlignment = defaults.string(forKey: dynamicIslandLyricsAlignmentKey)
+            .flatMap(LyricsTextAlignment.init(rawValue:)) ?? LyricsTextAlignment.defaultValue
         let menuBarLyricsAlignment = defaults.string(forKey: menuBarLyricsAlignmentKey)
             .flatMap(LyricsTextAlignment.init(rawValue:)) ?? LyricsTextAlignment.defaultValue
         let persistentDefaults = defaults.persistentDomain(forName: Bundle.main.bundleIdentifier ?? appIdentifier) ?? [:]
@@ -370,6 +374,7 @@ final class SettingsStore {
             dynamicIslandLyricsCornerRatio: dynamicIslandCornerRatio,
             dynamicIslandLyricsFontSize: Self.clampedDynamicIslandLyricsFontSize(defaults.double(forKey: dynamicIslandLyricsFontSizeKey)),
             dynamicIslandLyricsFontName: defaults.string(forKey: dynamicIslandLyricsFontNameKey) ?? "",
+            dynamicIslandLyricsAlignment: dynamicIslandLyricsAlignment,
             isDynamicIslandLyricsSpectrumEnabled: defaults.bool(forKey: dynamicIslandLyricsSpectrumEnabledKey),
             isDynamicIslandLyricsHidesOnHover: defaults.bool(forKey: dynamicIslandLyricsHidesOnHoverKey),
             isMenuBarLyricsEnabled: defaults.bool(forKey: menuBarLyricsEnabledKey),
@@ -482,6 +487,10 @@ final class SettingsStore {
 
     func setDynamicIslandLyricsFontName(_ fontName: String) {
         defaults.set(fontName, forKey: dynamicIslandLyricsFontNameKey)
+    }
+
+    func setDynamicIslandLyricsAlignment(_ alignment: LyricsTextAlignment) {
+        defaults.set(alignment.rawValue, forKey: dynamicIslandLyricsAlignmentKey)
     }
 
     func setDynamicIslandLyricsSpectrumEnabled(_ isEnabled: Bool) {

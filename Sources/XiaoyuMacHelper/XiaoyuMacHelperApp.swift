@@ -76,6 +76,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.onDynamicIslandLyricsCornerRatioChanged = { [weak self] ratio in self?.setDynamicIslandLyricsCornerRatio(ratio) }
         controlWindow.onDynamicIslandLyricsFontSizeChanged = { [weak self] fontSize in self?.setDynamicIslandLyricsFontSize(fontSize) }
         controlWindow.onDynamicIslandLyricsFontNameChanged = { [weak self] fontName in self?.setDynamicIslandLyricsFontName(fontName) }
+        controlWindow.onDynamicIslandLyricsAlignmentChanged = { [weak self] alignment in self?.setDynamicIslandLyricsAlignment(alignment) }
         controlWindow.onMenuBarLyricsChanged = { [weak self] isEnabled in self?.setMenuBarLyricsEnabled(isEnabled) }
         controlWindow.onMenuBarLyricsWidthChanged = { [weak self] width in self?.setMenuBarLyricsWidth(width) }
         controlWindow.onMenuBarLyricsAlignmentChanged = { [weak self] alignment in self?.setMenuBarLyricsAlignment(alignment) }
@@ -542,6 +543,12 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private func setDynamicIslandLyricsFontName(_ fontName: String) {
         settingsStore.setDynamicIslandLyricsFontName(fontName)
         currentSettings.dynamicIslandLyricsFontName = fontName
+        refreshDesktopLyricsSettings()
+    }
+
+    private func setDynamicIslandLyricsAlignment(_ alignment: LyricsTextAlignment) {
+        settingsStore.setDynamicIslandLyricsAlignment(alignment)
+        currentSettings.dynamicIslandLyricsAlignment = alignment
         refreshDesktopLyricsSettings()
     }
 

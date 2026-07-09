@@ -740,6 +740,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
     private var configuredCornerRatio: CGFloat = Metrics.defaultCornerRatio
     private var configuredFontSize: CGFloat = Metrics.defaultFontSize
     private var configuredFontName = ""
+    private var configuredAlignment: NSTextAlignment = .center
     private var isSpectrumEnabled = false
     private var hidesOnMouseHover = false
     private var isPresented = false
@@ -809,7 +810,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         titleLabel.fadeEdgeWidth = 18
         titleLabel.contentInsetX = 24
 
-        lyricLabel.alignment = .left
+        lyricLabel.alignment = configuredAlignment
         lyricLabel.fadeEdgeWidth = 16
         lyricLabel.contentInsetX = 16
         lyricLabel.fallbackScrollSpeed = 52
@@ -847,6 +848,8 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         configuredCornerRatio = Self.clampedShapeRatio(CGFloat(settings.dynamicIslandLyricsCornerRatio))
         configuredFontSize = Self.clampedFontSize(CGFloat(settings.dynamicIslandLyricsFontSize))
         configuredFontName = settings.dynamicIslandLyricsFontName
+        configuredAlignment = settings.dynamicIslandLyricsAlignment.nsTextAlignment
+        lyricLabel.alignment = configuredAlignment
         applyConfiguredFonts()
         isSpectrumEnabled = settings.isDynamicIslandLyricsSpectrumEnabled
         hidesOnMouseHover = settings.isDynamicIslandLyricsHidesOnHover
@@ -879,6 +882,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         lineElapsed: TimeInterval = 0,
         previousLineDuration: TimeInterval? = nil,
         nextLineDuration: TimeInterval? = nil,
+        wordTimings: [DesktopLyricWordTiming] = [],
         isPlaying: Bool = true
     ) {
         let cleanPrimary = primary.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -889,7 +893,10 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
 
         let cleanSongTitle = songTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
         let titleText = cleanSongTitle?.isEmpty == false ? (cleanSongTitle ?? "") : "音乐歌词"
-        let lyricText = compactLyric(primary: cleanPrimary, translation: showsTranslation ? translation : nil)
+        let cleanTranslation = translation?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visibleTranslation = showsTranslation && cleanTranslation?.isEmpty == false ? cleanTranslation : nil
+        let lyricText = compactLyric(primary: cleanPrimary, translation: visibleTranslation)
+        let lyricWordTimings = visibleTranslation == nil ? wordTimings : []
         let didTextChange = titleText != currentTitleText || lyricText != currentLyricText
         let didLineChange = lineIdentityChanged(from: currentLineIdentity, to: lineStartTime)
 
@@ -921,6 +928,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             elapsed: lineElapsed,
             previousDuration: previousLineDuration,
             nextDuration: nextLineDuration,
+            wordTimings: lyricWordTimings,
             isPlaying: isPlaying
         )
 
@@ -1746,6 +1754,12 @@ private final class MenuBarLyricsTickerView: NSView {
         var durationBucket: Int
         var previousBucket: Int
         var nextBucket: Int
+        var wordTimingBucket: Int
+    }
+
+    private struct WordScrollAnchor {
+        var time: CFTimeInterval
+        var offset: CGFloat
     }
 
     private struct TimedScrollPlan {
@@ -1756,6 +1770,7 @@ private final class MenuBarLyricsTickerView: NSView {
         var targetOffset: CGFloat
         var rampFraction: CFTimeInterval
         var leadInOffset: CGFloat
+        var wordAnchors: [WordScrollAnchor]
 
         var travelEnd: CFTimeInterval { startDelay + travelDuration }
     }
@@ -1820,7 +1835,9 @@ private final class MenuBarLyricsTickerView: NSView {
     private var timingIsFresh = false
     private var timingIsPaused = false
     private var cachedPlan: TimedScrollPlan?
-    private var timedOffsetMemory: (identity: TimeInterval?, maxOffset: CGFloat, offset: CGFloat)?
+    private var timedOffsetMemory: (identity: TimeInterval?, maxOffset: CGFloat, offset: CGFloat, timestamp: CFTimeInterval)?
+    private var wordTimings: [DesktopLyricWordTiming] = []
+    private var displayTimestamp: CFTimeInterval = CACurrentMediaTime()
     private var untimedState = UntimedState()
     private var untimedPausedAt: CFTimeInterval?
     private var activeDisplayLink: CADisplayLink?
@@ -1886,6 +1903,7 @@ private final class MenuBarLyricsTickerView: NSView {
         lineElapsed: TimeInterval,
         previousLineDuration: TimeInterval? = nil,
         nextLineDuration: TimeInterval? = nil,
+        wordTimings: [DesktopLyricWordTiming] = [],
         isPlaying: Bool = true
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1901,6 +1919,7 @@ private final class MenuBarLyricsTickerView: NSView {
             elapsed: lineElapsed,
             previousDuration: previousLineDuration,
             nextDuration: nextLineDuration,
+            wordTimings: wordTimings,
             isPlaying: isPlaying
         )
         updateAnimationState()
@@ -1913,6 +1932,7 @@ private final class MenuBarLyricsTickerView: NSView {
         measuredTextRect = .zero
         measuredSize = .zero
         cachedPlan = nil
+        wordTimings = []
         timingIsFresh = false
         timingIsPaused = false
         stopDisplayDriver()
@@ -1945,6 +1965,7 @@ private final class MenuBarLyricsTickerView: NSView {
         elapsed: TimeInterval,
         previousDuration: TimeInterval?,
         nextDuration: TimeInterval?,
+        wordTimings: [DesktopLyricWordTiming] = [],
         isPlaying: Bool = true
     ) {
         let now = CACurrentMediaTime()
@@ -1952,6 +1973,12 @@ private final class MenuBarLyricsTickerView: NSView {
         let normalizedDuration = normalizedDuration(duration)
         let normalizedPrevious = normalizedNeighborDuration(previousDuration)
         let normalizedNext = normalizedNeighborDuration(nextDuration)
+        let normalizedWords = normalizedWordTimings(wordTimings, duration: normalizedDuration)
+        if normalizedWords != self.wordTimings {
+            self.wordTimings = normalizedWords
+            timedOffsetMemory = nil
+            invalidateScrollPlan()
+        }
         let normalizedElapsed = normalizedDuration.map { min(max(0, elapsed), $0) } ?? max(0, elapsed)
         let shouldFreezeTiming = !isPlaying
         let visualElapsedBeforeUpdate = lineTiming.elapsed(at: now, isPaused: timingIsPaused)
@@ -2021,6 +2048,13 @@ private final class MenuBarLyricsTickerView: NSView {
                 lineTiming.rate = 1.0
                 timedOffsetMemory = nil
                 invalidateScrollPlan()
+            } else if abs(drift) < 0.24 {
+                // Ignore ordinary MediaRemote polling jitter. Rebase to the current visual frame and
+                // keep a neutral rate; otherwise tiny elapsed-time corrections show up as slow-motion
+                // word-lyric tremble.
+                lineTiming.elapsedAtSync = predicted
+                lineTiming.syncedAt = now
+                lineTiming.rate = 1.0
             } else {
                 // Never correct ordinary polling drift by moving the offset immediately. Keep the
                 // current position as the base and use a small speed bias to catch up or slow down.
@@ -2043,7 +2077,7 @@ private final class MenuBarLyricsTickerView: NSView {
 
     private func renderSample(maxOffset: CGFloat, shouldScroll: Bool) -> (offset: CGFloat, alpha: CGFloat) {
         guard shouldScroll else { return (0, 1) }
-        let now = CACurrentMediaTime()
+        let now = renderTimestamp()
         if let duration = lineTiming.duration, timingIsFresh {
             let plan = scrollPlan(duration: duration, maxOffset: maxOffset)
             return (timedOffset(at: now, plan: plan), 1)
@@ -2070,98 +2104,25 @@ private final class MenuBarLyricsTickerView: NSView {
         }
 
         let visibleWidth = max(1, protectedTextRect().width)
-        let overflowRatio = clamp(CFTimeInterval(maxOffset / visibleWidth), 0.03, 6.0)
-        let fontSize = CFTimeInterval(max(10, font.pointSize))
+        let textWidth = visibleWidth + maxOffset
         let current = clamp(duration, 0.14, 42.0)
-        let previous = lineTiming.previousDuration ?? current
-        let next = lineTiming.nextDuration ?? current
-        let rhythm = weightedRhythm(previous: previous, current: current, next: next)
-        let characterCount = CFTimeInterval(max(1, stringValue.count))
-
-        let tempoPressure = clamp((2.35 - rhythm) / 1.55, 0, 1)
-        let slowSection = clamp((rhythm - 3.70) / 4.60, 0, 1)
-        let shortLinePressure = clamp((1.35 - current) / 0.95, 0, 1)
-        let overflowPressure = clamp((overflowRatio - 0.20) / 1.70, 0, 1)
-        let densityPressure = clamp((characterCount / max(0.42, current) - 7.0) / 17.0, 0, 1)
-        let urgency = clamp(
-            max(tempoPressure * 0.95, shortLinePressure, overflowPressure * 0.68, densityPressure * 0.72),
-            0,
-            1
+        let rampFraction = formulaRampFraction(
+            lineDuration: current,
+            viewportWidth: visibleWidth,
+            textWidth: textWidth,
+            maxOffset: maxOffset
         )
+        let wordAnchors = wordScrollAnchors(duration: current, viewportWidth: visibleWidth, maxOffset: maxOffset)
 
-        let switchReserve = clamp(current * 0.010, 0.002, 0.024)
-        let usableDuration = max(0.080, current - switchReserve)
-        let readableSpeed = clamp(
-            fontSize * (1.18 + overflowRatio * 0.080)
-                + 32.0
-                + tempoPressure * 20.0
-                + densityPressure * 18.0
-                - slowSection * 7.0,
-            52.0,
-            154.0
-        )
-
-        let relaxedHeadHold = clamp(current * (0.070 + slowSection * 0.018), 0.070, 0.320)
-        let compactHeadHold = clamp(current * (0.012 + overflowPressure * 0.004), 0.003, 0.055)
-        var headHold = mix(relaxedHeadHold, compactHeadHold, urgency)
-        headHold = clamp(headHold - tempoPressure * 0.026 - overflowPressure * 0.016, 0.002, usableDuration * 0.24)
-
-        let desiredTailHold = clamp(current * (0.115 + slowSection * 0.038), 0.145, 0.520)
-        let compactTailHold = clamp(current * (0.060 - shortLinePressure * 0.018), 0.034, 0.125)
-        var tailHold = mix(desiredTailHold, compactTailHold, urgency)
-        tailHold = clamp(tailHold, 0.030, usableDuration * 0.40)
-
-        let naturalTravel = CFTimeInterval(maxOffset) / max(1, readableSpeed)
-        let ordinaryLine = urgency < 0.72 && current > 1.25
-        if ordinaryLine {
-            let extraTail = min(usableDuration * 0.070, max(0, usableDuration - headHold - tailHold - naturalTravel) * 0.66)
-            tailHold += max(0, extraTail)
-        }
-
-        var travelBudget = usableDuration - headHold - tailHold
-        if travelBudget < 0.055 {
-            headHold = min(headHold, max(0.002, usableDuration * 0.040))
-            travelBudget = usableDuration - headHold - tailHold
-        }
-        if travelBudget < 0.055 {
-            let protectedTail = clamp(usableDuration * 0.075, 0.026, 0.080)
-            tailHold = min(tailHold, protectedTail)
-            travelBudget = usableDuration - headHold - tailHold
-        }
-        if travelBudget < 0.045 {
-            headHold = max(0.001, usableDuration * 0.020)
-            tailHold = max(0.012, usableDuration * 0.045)
-            travelBudget = max(0.038, usableDuration - headHold - tailHold)
-        }
-
-        let earlyFinishBias = clamp(0.090 + slowSection * 0.060 - urgency * 0.055, 0.020, 0.155)
-        let preferredTravelCap = max(0.038, travelBudget * (1.0 - earlyFinishBias))
-        let minimumTravel = clamp(0.095 + overflowPressure * 0.030 - shortLinePressure * 0.045, 0.040, 0.300)
-        let travelDuration = clamp(naturalTravel, min(minimumTravel, preferredTravelCap), preferredTravelCap)
-
-        let actualSpeed = CFTimeInterval(maxOffset) / max(0.001, travelDuration)
-        let speedPressure = clamp((actualSpeed - readableSpeed) / max(1.0, readableSpeed * 2.2), 0, 1)
-        let rampFraction = clamp(
-            0.170
-                + slowSection * 0.030
-                - tempoPressure * 0.038
-                - shortLinePressure * 0.046
-                - speedPressure * 0.052,
-            0.045,
-            0.230
-        )
-
-        let spare = max(0, travelBudget - travelDuration)
-        let finalStartDelay = max(0.001, headHold + spare * 0.10)
-        let finalTailHold = max(0.012, tailHold + spare * 0.82)
         let plan = TimedScrollPlan(
             signature: signature,
-            startDelay: finalStartDelay,
-            travelDuration: max(0.035, travelDuration),
-            tailHold: finalTailHold,
+            startDelay: 0,
+            travelDuration: current,
+            tailHold: 0,
             targetOffset: maxOffset,
             rampFraction: rampFraction,
-            leadInOffset: 0
+            leadInOffset: 0,
+            wordAnchors: wordAnchors
         )
         cachedPlan = plan
         return plan
@@ -2170,39 +2131,55 @@ private final class MenuBarLyricsTickerView: NSView {
     private func timedOffset(at timestamp: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
         let elapsed = lineTiming.elapsed(at: timestamp, isPaused: timingIsPaused)
         let rawOffset: CGFloat
-        if elapsed <= plan.startDelay {
-            let warmup = clamp(elapsed / max(0.001, plan.startDelay), 0, 1)
-            rawOffset = plan.leadInOffset * CGFloat(easeOutCubic(warmup))
-        } else if elapsed >= plan.travelEnd {
-            rawOffset = plan.targetOffset
+        if !plan.wordAnchors.isEmpty {
+            rawOffset = fluidWordTimedOffset(elapsed: elapsed, plan: plan)
         } else {
-            let progress = clamp((elapsed - plan.startDelay) / max(0.001, plan.travelDuration), 0, 1)
-            let curve = CGFloat(readableMotionCurve(progress, rampFraction: plan.rampFraction))
-            let remainingDistance = max(0, plan.targetOffset - plan.leadInOffset)
-            rawOffset = plan.leadInOffset + remainingDistance * curve
+            let progress = clamp(elapsed / max(0.001, plan.travelDuration), 0, 1)
+            let curve = CGFloat(lineTimelineProgress(progress, rampFraction: plan.rampFraction))
+            rawOffset = plan.targetOffset * curve
         }
-        return continuousTimedOffset(rawOffset, maxOffset: plan.targetOffset)
+        return continuousTimedOffset(rawOffset, maxOffset: plan.targetOffset, at: timestamp)
     }
 
-    private func continuousTimedOffset(_ rawOffset: CGFloat, maxOffset: CGFloat) -> CGFloat {
+    private func continuousTimedOffset(_ rawOffset: CGFloat, maxOffset: CGFloat, at timestamp: CFTimeInterval) -> CGFloat {
         let clampedOffset = min(max(0, rawOffset), maxOffset)
         guard !timingIsPaused else {
-            timedOffsetMemory = (lineTiming.identity, maxOffset, clampedOffset)
+            timedOffsetMemory = (lineTiming.identity, maxOffset, clampedOffset, timestamp)
             return clampedOffset
         }
 
-        if let memory = timedOffsetMemory {
-            let sameIdentity = !didLineIdentityChange(from: memory.identity, to: lineTiming.identity)
-            let sameDistance = abs(memory.maxOffset - maxOffset) <= 2.0
-            if sameIdentity && sameDistance {
-                let stabilized = max(memory.offset, clampedOffset)
-                timedOffsetMemory = (lineTiming.identity, maxOffset, stabilized)
-                return stabilized
-            }
+        guard let memory = timedOffsetMemory else {
+            timedOffsetMemory = (lineTiming.identity, maxOffset, clampedOffset, timestamp)
+            return clampedOffset
         }
 
-        timedOffsetMemory = (lineTiming.identity, maxOffset, clampedOffset)
-        return clampedOffset
+        let sameIdentity = !didLineIdentityChange(from: memory.identity, to: lineTiming.identity)
+        let sameDistance = abs(memory.maxOffset - maxOffset) <= 2.0
+        let deltaTime = timestamp - memory.timestamp
+        guard sameIdentity, sameDistance, deltaTime >= 0, deltaTime <= 0.24 else {
+            timedOffsetMemory = (lineTiming.identity, maxOffset, clampedOffset, timestamp)
+            return clampedOffset
+        }
+
+        // Keep the ticker monotonic, but avoid snapping tiny word-timed deltas. Those snaps are
+        // visible in slow lines as a subtle stop-start cadence.
+        let monotonicTarget = max(memory.offset, clampedOffset)
+        let hasWordTiming = !wordTimings.isEmpty
+        let smoothingTime = hasWordTiming ? 0.038 : 0.026
+        let factor = 1 - exp(-clamp(deltaTime, 0.001, 0.050) / smoothingTime)
+        var stabilized = memory.offset + (monotonicTarget - memory.offset) * CGFloat(factor)
+        if hasWordTiming {
+            if maxOffset - monotonicTarget < 0.24 {
+                stabilized = monotonicTarget
+            }
+        } else {
+            let snapDistance: CGFloat = 0.12
+            if monotonicTarget - stabilized < snapDistance {
+                stabilized = monotonicTarget
+            }
+        }
+        timedOffsetMemory = (lineTiming.identity, maxOffset, stabilized, timestamp)
+        return stabilized
     }
 
     private func untimedSample(at timestamp: CFTimeInterval, maxOffset: CGFloat) -> (offset: CGFloat, alpha: CGFloat) {
@@ -2297,8 +2274,10 @@ private final class MenuBarLyricsTickerView: NSView {
 
     private func startDisplayDriver() {
         guard activeDisplayLink == nil, window != nil else { return }
+        displayTimestamp = CACurrentMediaTime()
         let target = MenuBarLyricsTickerDisplayLinkTarget(view: self)
         let link = displayLink(target: target, selector: #selector(MenuBarLyricsTickerDisplayLinkTarget.displayLinkDidFire(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
         link.add(to: .main, forMode: .common)
         link.isPaused = false
         activeDisplayLink = link
@@ -2312,7 +2291,15 @@ private final class MenuBarLyricsTickerView: NSView {
     }
 
     fileprivate func displayLinkDidFire(_ link: CADisplayLink) {
+        // Use the actual display-link timestamp rather than the predicted target timestamp; the
+        // predicted value can jitter slightly under variable refresh pacing and makes slow lyric
+        // motion look uneven.
+        displayTimestamp = link.timestamp > 0 ? link.timestamp : CACurrentMediaTime()
         needsDisplay = true
+    }
+
+    private func renderTimestamp() -> CFTimeInterval {
+        activeDisplayLink == nil ? CACurrentMediaTime() : displayTimestamp
     }
 
     private func attributedString() -> NSAttributedString {
@@ -2384,6 +2371,7 @@ private final class MenuBarLyricsTickerView: NSView {
         cachedPlan = nil
         timedOffsetMemory = nil
         if !keepsTiming {
+            wordTimings = []
             lineTiming = LineTiming(identity: nil, duration: nil, previousDuration: nil, nextDuration: nil, elapsedAtSync: 0, syncedAt: CACurrentMediaTime(), rate: 1.0)
             timingIsFresh = false
             timingIsPaused = false
@@ -2404,8 +2392,9 @@ private final class MenuBarLyricsTickerView: NSView {
             textWidthBucket: Int((maxOffset / 2).rounded()),
             fontBucket: Int((font.pointSize * 10).rounded()),
             durationBucket: bucket(lineTiming.duration ?? duration),
-            previousBucket: bucket(lineTiming.previousDuration ?? duration),
-            nextBucket: bucket(lineTiming.nextDuration ?? duration)
+            previousBucket: 0,
+            nextBucket: 0,
+            wordTimingBucket: wordTimingBucket()
         )
     }
 
@@ -2461,6 +2450,179 @@ private final class MenuBarLyricsTickerView: NSView {
         }
     }
 
+    private func normalizedWordTimings(_ timings: [DesktopLyricWordTiming], duration: CFTimeInterval?) -> [DesktopLyricWordTiming] {
+        let textLength = stringValue.utf16.count
+        guard textLength > 0, !timings.isEmpty else { return [] }
+        let maxEnd = duration ?? timings.map(\.end).max() ?? 0
+        return timings.filter { timing in
+            timing.start.isFinite
+                && timing.end.isFinite
+                && timing.end > timing.start + 0.015
+                && timing.start >= -0.020
+                && timing.end <= maxEnd + 0.75
+                && timing.utf16Location >= 0
+                && timing.utf16Length > 0
+                && timing.utf16End <= textLength
+        }
+        .map { timing in
+            DesktopLyricWordTiming(
+                start: max(0, timing.start),
+                end: min(maxEnd, timing.end),
+                utf16Location: timing.utf16Location,
+                utf16Length: timing.utf16Length
+            )
+        }
+        .sorted { lhs, rhs in
+            if abs(lhs.start - rhs.start) > 0.0005 { return lhs.start < rhs.start }
+            return lhs.utf16Location < rhs.utf16Location
+        }
+    }
+
+    private func wordTimingBucket() -> Int {
+        guard !wordTimings.isEmpty else { return 0 }
+        var hash = wordTimings.count &* 31
+        for timing in wordTimings.prefix(8) {
+            hash = hash &* 31 &+ Int((timing.start * 20).rounded())
+            hash = hash &* 31 &+ Int((timing.end * 20).rounded())
+            hash = hash &* 31 &+ timing.utf16Location
+            hash = hash &* 31 &+ timing.utf16Length
+        }
+        if let last = wordTimings.last {
+            hash = hash &* 31 &+ Int((last.end * 20).rounded())
+            hash = hash &* 31 &+ last.utf16End
+        }
+        return hash
+    }
+
+    private func wordScrollAnchors(duration: CFTimeInterval, viewportWidth: CGFloat, maxOffset: CGFloat) -> [WordScrollAnchor] {
+        guard !wordTimings.isEmpty, maxOffset > 8, viewportWidth > 8 else { return [] }
+        let nsText = stringValue as NSString
+        let preferredCenter = viewportWidth * 0.47
+        var anchors: [WordScrollAnchor] = [WordScrollAnchor(time: 0, offset: 0)]
+        var lastOffset: CGFloat = 0
+
+        for timing in wordTimings {
+            guard timing.utf16End <= nsText.length else { continue }
+            let prefix = nsText.substring(with: NSRange(location: 0, length: timing.utf16Location))
+            let segment = nsText.substring(with: NSRange(location: timing.utf16Location, length: timing.utf16Length))
+            let segmentCenter = measuredInlineWidth(prefix) + measuredInlineWidth(segment) / 2
+            let rawTarget = min(maxOffset, max(lastOffset, segmentCenter - preferredCenter))
+            let target = max(lastOffset, rawTarget)
+            let anchorTime = clamp(mix(timing.start, timing.end, 0.36), 0, duration)
+            let minimumVisualStep = max(3.0, min(6.0, font.pointSize * 0.18))
+
+            if let previous = anchors.last, anchorTime - previous.time < 0.018 {
+                anchors[anchors.count - 1] = WordScrollAnchor(time: previous.time, offset: max(previous.offset, target))
+            } else if target - (anchors.last?.offset ?? 0) >= minimumVisualStep || target >= maxOffset - 1.0 {
+                anchors.append(WordScrollAnchor(time: anchorTime, offset: target))
+            }
+            lastOffset = max(lastOffset, target)
+        }
+
+        if let last = anchors.last, duration - last.time > 0.050, maxOffset - last.offset > 1.5 {
+            anchors.append(WordScrollAnchor(time: duration, offset: maxOffset))
+        }
+        return anchors.count > 1 ? anchors : []
+    }
+
+    private func measuredInlineWidth(_ text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+        paragraph.lineBreakMode = .byClipping
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: font,
+                .foregroundColor: textColor,
+                .paragraphStyle: paragraph,
+                .kern: 0.1
+            ]
+        )
+        return attributed.size().width
+    }
+
+    private func fluidWordTimedOffset(elapsed: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
+        let progress = clamp(elapsed / max(0.001, plan.travelDuration), 0, 1)
+        let continuousCurve = lineTimelineProgress(
+            progress,
+            rampFraction: min(plan.rampFraction, 0.050)
+        )
+        let continuousOffset = plan.targetOffset * CGFloat(continuousCurve)
+        let guidedOffset = wordTimedOffset(elapsed: elapsed, plan: plan)
+        let durationPressure = clamp((plan.travelDuration - 2.2) / 7.0, 0, 1)
+        let guideWeight = CGFloat(0.34 - durationPressure * 0.14)
+        let blended = continuousOffset * (1 - guideWeight) + guidedOffset * guideWeight
+        return min(max(0, blended), plan.targetOffset)
+    }
+
+    private func wordTimedOffset(elapsed: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
+        let anchors = plan.wordAnchors
+        guard let first = anchors.first else { return 0 }
+        let safeElapsed = clamp(elapsed, 0, plan.travelDuration)
+        if safeElapsed <= first.time { return first.offset }
+
+        for index in 1..<anchors.count {
+            let next = anchors[index]
+            if safeElapsed <= next.time {
+                return monotoneHermiteOffset(at: safeElapsed, anchors: anchors, segmentEndIndex: index)
+            }
+        }
+        return anchors.last?.offset ?? 0
+    }
+
+    private func monotoneHermiteOffset(
+        at time: CFTimeInterval,
+        anchors: [WordScrollAnchor],
+        segmentEndIndex index: Int
+    ) -> CGFloat {
+        let previous = anchors[index - 1]
+        let next = anchors[index]
+        let span = max(0.001, next.time - previous.time)
+        let distance = next.offset - previous.offset
+        guard distance > 0.10 else { return previous.offset }
+
+        let currentSlope = CGFloat(distance) / CGFloat(span)
+        let incomingSlope: CGFloat
+        if index >= 2 {
+            let incoming = anchors[index - 1].offset - anchors[index - 2].offset
+            let incomingTime = max(0.001, anchors[index - 1].time - anchors[index - 2].time)
+            incomingSlope = max(0, CGFloat(incoming) / CGFloat(incomingTime))
+        } else {
+            incomingSlope = currentSlope
+        }
+
+        let outgoingSlope: CGFloat
+        if index + 1 < anchors.count {
+            let outgoing = anchors[index + 1].offset - anchors[index].offset
+            let outgoingTime = max(0.001, anchors[index + 1].time - anchors[index].time)
+            outgoingSlope = max(0, CGFloat(outgoing) / CGFloat(outgoingTime))
+        } else {
+            outgoingSlope = currentSlope
+        }
+
+        let maxSlope = currentSlope * 2.70
+        let slope0 = min(maxSlope, max(0, (incomingSlope + currentSlope) * 0.5))
+        let slope1 = min(maxSlope, max(0, (currentSlope + outgoingSlope) * 0.5))
+        let u = CGFloat(clamp((time - previous.time) / span, 0, 1))
+        let u2 = u * u
+        let u3 = u2 * u
+        let h00 = 2 * u3 - 3 * u2 + 1
+        let h10 = u3 - 2 * u2 + u
+        let h01 = -2 * u3 + 3 * u2
+        let h11 = u3 - u2
+        let value = h00 * previous.offset
+            + h10 * CGFloat(span) * slope0
+            + h01 * next.offset
+            + h11 * CGFloat(span) * slope1
+        return min(max(previous.offset, value), next.offset)
+    }
+
+    private func mix(_ a: CFTimeInterval, _ b: CFTimeInterval, _ amount: CFTimeInterval) -> CFTimeInterval {
+        let t = clamp(amount, 0, 1)
+        return a + (b - a) * t
+    }
+
     private func weightedRhythm(previous: CFTimeInterval, current: CFTimeInterval, next: CFTimeInterval) -> CFTimeInterval {
         let clampedPrevious = clamp(previous, 0.70, 8.5)
         let clampedCurrent = clamp(current, 0.70, 8.5)
@@ -2468,26 +2630,56 @@ private final class MenuBarLyricsTickerView: NSView {
         return clampedPrevious * 0.22 + clampedCurrent * 0.56 + clampedNext * 0.22
     }
 
-    private func readableMotionCurve(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
-        let t = clamp(value, 0, 1)
-        let ramp = clamp(rampFraction, 0.045, 0.42)
-        guard ramp < 0.49 else { return smootherStep(t) }
-        let totalArea = 1 - ramp
-        if t < ramp {
-            let u = t / ramp
-            return ramp * smoothstepIntegral(u) / totalArea
-        }
-        if t > 1 - ramp {
-            let u = (1 - t) / ramp
-            let tailArea = ramp * smoothstepIntegral(u)
-            return 1 - tailArea / totalArea
-        }
-        return (0.5 * ramp + (t - ramp)) / totalArea
+    private func formulaRampFraction(
+        lineDuration: CFTimeInterval,
+        viewportWidth: CGFloat,
+        textWidth: CGFloat,
+        maxOffset: CGFloat
+    ) -> CFTimeInterval {
+        let visible = max(1, CFTimeInterval(viewportWidth))
+        let total = max(visible, CFTimeInterval(textWidth))
+        let scrollable = max(0, CFTimeInterval(maxOffset))
+        let overflowRatio = clamp(scrollable / visible, 0, 6.0)
+        let coverageRatio = clamp(scrollable / total, 0, 0.96)
+        let shortLinePressure = clamp((1.25 - lineDuration) / 0.95, 0, 1)
+        let longLineEase = clamp((lineDuration - 4.0) / 8.0, 0, 1)
+        return clamp(
+            0.055
+                + longLineEase * 0.070
+                + coverageRatio * 0.040
+                - overflowRatio * 0.012
+                - shortLinePressure * 0.030,
+            0.018,
+            0.155
+        )
     }
 
-    private func mix(_ a: CFTimeInterval, _ b: CFTimeInterval, _ amount: CFTimeInterval) -> CFTimeInterval {
-        let t = clamp(amount, 0, 1)
-        return a + (b - a) * t
+    private func lineTimelineProgress(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
+        let startRamp = clamp(rampFraction * 1.42 + 0.010, 0.040, 0.190)
+        let endRamp = clamp(rampFraction * 0.92 + 0.006, 0.030, 0.145)
+        return asymmetricTimelineProgress(value, startRamp: startRamp, endRamp: endRamp)
+    }
+
+    private func asymmetricTimelineProgress(_ value: CFTimeInterval, startRamp: CFTimeInterval, endRamp: CFTimeInterval) -> CFTimeInterval {
+        let t = clamp(value, 0, 1)
+        let start = clamp(startRamp, 0.001, 0.42)
+        let end = clamp(endRamp, 0.001, min(0.42, 0.92 - start))
+        let totalArea = max(0.001, 1 - (start + end) / 2)
+        if t < start {
+            let u = t / start
+            let area = start * (u - sin(2 * Double.pi * u) / (2 * Double.pi)) / 2
+            return area / totalArea
+        }
+        if t > 1 - end {
+            let u = (1 - t) / end
+            let tailArea = end * (u - sin(2 * Double.pi * u) / (2 * Double.pi)) / 2
+            return 1 - tailArea / totalArea
+        }
+        return (0.5 * start + (t - start)) / totalArea
+    }
+
+    private func readableMotionCurve(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
+        lineTimelineProgress(value, rampFraction: rampFraction)
     }
 
     private func clamp(_ value: CFTimeInterval, _ lower: CFTimeInterval, _ upper: CFTimeInterval) -> CFTimeInterval {
@@ -2555,6 +2747,7 @@ final class MenuBarLyricsSurface {
         lineElapsed: TimeInterval,
         previousLineDuration: TimeInterval? = nil,
         nextLineDuration: TimeInterval? = nil,
+        wordTimings: [DesktopLyricWordTiming] = [],
         isPlaying: Bool = true
     ) {
         let text = primary.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2566,7 +2759,10 @@ final class MenuBarLyricsSurface {
         let item = ensureStatusItem()
         item.isVisible = true
         item.length = configuredWidth
-        let combined = compactTitle(primary: text, translation: showsTranslation ? translation : nil)
+        let cleanTranslation = translation?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visibleTranslation = showsTranslation && cleanTranslation?.isEmpty == false ? cleanTranslation : nil
+        let combined = compactTitle(primary: text, translation: visibleTranslation)
+        let tickerWordTimings = visibleTranslation == nil ? wordTimings : []
         let ticker = ensureTickerView(on: item)
         ticker.setText(
             combined,
@@ -2575,6 +2771,7 @@ final class MenuBarLyricsSurface {
             lineElapsed: lineElapsed,
             previousLineDuration: previousLineDuration,
             nextLineDuration: nextLineDuration,
+            wordTimings: tickerWordTimings,
             isPlaying: isPlaying
         )
         item.button?.toolTip = [text, showsTranslation ? translation : nil]

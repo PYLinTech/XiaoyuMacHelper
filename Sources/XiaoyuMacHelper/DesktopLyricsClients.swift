@@ -471,7 +471,19 @@ private final class AppleMusicLyricsProvider: DesktopLyricsProvider, @unchecked 
 
         if ttml.contains("begin=") { score += 5 }
         if ttml.contains("end=") { score += 5 }
+        if isWordTimedTTML(ttml) {
+            score += 24
+        } else if ttml.range(of: #"itunes:timing=["']Line["']"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            score += 4
+        }
         return score
+    }
+
+    private func isWordTimedTTML(_ ttml: String) -> Bool {
+        if ttml.range(of: #"itunes:timing=["']Word["']"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return true
+        }
+        return ttml.range(of: #"<span\b[^>]*\bbegin\s*=\s*["'][^"']+["'][^>]*\bend\s*=\s*["']"#, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     private func extractXMLLanguage(from ttml: String) -> String? {

@@ -17,6 +17,7 @@ final class DesktopLyricsController {
         var lineElapsed: TimeInterval
         var previousLineDuration: TimeInterval?
         var nextLineDuration: TimeInterval?
+        var wordTimings: [DesktopLyricWordTiming]
     }
 
     private var settings: AppSettings
@@ -284,7 +285,7 @@ final class DesktopLyricsController {
         at displayElapsedTime: TimeInterval,
         track: DesktopLyricsTrack
     ) -> DesktopLyricLineContext? {
-        guard let rawIndex = DesktopLyricsParser.lineIndex(in: lines, at: displayElapsedTime) else {
+        guard let rawIndex = visualLineIndex(in: lines, at: displayElapsedTime, trackDuration: track.duration) else {
             resetStableLineSelection()
             return nil
         }
@@ -356,7 +357,8 @@ final class DesktopLyricsController {
             lineDuration: context.duration,
             lineElapsed: context.elapsedInLine,
             previousLineDuration: context.previousDuration,
-            nextLineDuration: context.nextDuration
+            nextLineDuration: context.nextDuration,
+            wordTimings: context.line.wordTimings
         )
     }
 
@@ -382,10 +384,11 @@ final class DesktopLyricsController {
     }
 
     private func lineSwitchCommitDelay(previousGap: TimeInterval) -> TimeInterval {
-        guard previousGap.isFinite, previousGap > 0 else { return 0.10 }
-        if previousGap >= 12.0 { return 0.24 }
-        if previousGap >= 7.0 { return 0.18 }
-        return min(0.12, max(0.045, previousGap * 0.012))
+        // The renderer now consumes the whole line duration for scrolling, so an extra visual
+        // commit delay would look like the lyric finished and waited. Keep only a tiny debounce to
+        // absorb Now Playing timestamp jitter at the exact boundary.
+        guard previousGap.isFinite, previousGap > 0 else { return 0.020 }
+        return min(0.040, max(0.014, previousGap * 0.004))
     }
 
     private func backwardLineBoundaryTolerance(currentGap: TimeInterval?) -> TimeInterval {
@@ -397,15 +400,100 @@ final class DesktopLyricsController {
 
     private func stableLineDuration(in lines: [DesktopLyricLine], index: Int, trackDuration: TimeInterval?) -> TimeInterval? {
         guard lines.indices.contains(index) else { return nil }
+        let line = lines[index]
         let endTime: TimeInterval?
-        if index + 1 < lines.count {
+        if let explicitEnd = line.endTime, explicitEnd.isFinite, explicitEnd > line.time + 0.12 {
+            endTime = explicitEnd
+        } else if index + 1 < lines.count {
             endTime = lines[index + 1].time
         } else {
             endTime = trackDuration
         }
         guard let endTime, endTime.isFinite else { return nil }
-        return max(0, endTime - lines[index].time)
+        return max(0, endTime - line.time)
     }
+
+    private func visualLineIndex(
+        in lines: [DesktopLyricLine],
+        at elapsedTime: TimeInterval,
+        trackDuration: TimeInterval?
+    ) -> Int? {
+        guard !lines.isEmpty else { return nil }
+        let safeTime = elapsedTime.isFinite ? max(0, elapsedTime) : 0
+        guard safeTime + 0.001 >= lines[lines.startIndex].time else { return nil }
+
+        var index = lines.startIndex
+        while index + 1 < lines.count {
+            let boundary = visualSwitchBoundary(
+                from: lines[index],
+                to: lines[index + 1],
+                previousIndex: index,
+                nextIndex: index + 1,
+                lines: lines,
+                trackDuration: trackDuration
+            )
+            guard safeTime + 0.001 >= boundary else { break }
+            index += 1
+        }
+        return index
+    }
+
+    private func visualSwitchBoundary(
+        from previous: DesktopLyricLine,
+        to next: DesktopLyricLine,
+        previousIndex: Int,
+        nextIndex: Int,
+        lines: [DesktopLyricLine],
+        trackDuration: TimeInterval?
+    ) -> TimeInterval {
+        let nextStart = next.time
+        guard nextStart.isFinite else { return previous.time }
+
+        // Placeholders intentionally own long silence. Do not preview a real lyric through a
+        // leading/interlude placeholder, otherwise the old “blank intro shows lyrics too early”
+        // problem comes back.
+        guard !isSilencePlaceholderText(previous.text), !isSilencePlaceholderText(next.text) else {
+            return nextStart
+        }
+
+        if let previousEnd = effectiveLineEndTime(in: lines, index: previousIndex, trackDuration: trackDuration),
+           previousEnd.isFinite,
+           previousEnd < nextStart - 0.035 {
+            // If Apple Music gives a real gap between two sung lines, switch at the visual midpoint
+            // of that gap. The outgoing line has already finished, and the incoming line gets time
+            // to fade in before its first word.
+            return max(previous.time, min(nextStart, (previousEnd + nextStart) * 0.5))
+        }
+
+        // When there is no explicit gap, the previous code changed exactly at the next line's
+        // begin time. That made the crossfade and edge mask eat the first characters. Shift the
+        // visual switch a small amount earlier, so the fade is centered around the line boundary
+        // instead of starting after it.
+        let previousDuration = stableLineDuration(in: lines, index: previousIndex, trackDuration: trackDuration) ?? 3.0
+        let nextDuration = stableLineDuration(in: lines, index: nextIndex, trackDuration: trackDuration) ?? 3.0
+        let sharedDuration = min(max(0.45, previousDuration), max(0.45, nextDuration))
+        let visualLead = min(0.34, max(0.12, sharedDuration * 0.085))
+        return max(previous.time + 0.08, nextStart - visualLead)
+    }
+
+    private func effectiveLineEndTime(in lines: [DesktopLyricLine], index: Int, trackDuration: TimeInterval?) -> TimeInterval? {
+        guard lines.indices.contains(index) else { return nil }
+        let line = lines[index]
+        if let explicitEnd = line.endTime, explicitEnd.isFinite, explicitEnd > line.time + 0.12 {
+            return explicitEnd
+        }
+        if index + 1 < lines.count { return lines[index + 1].time }
+        return trackDuration
+    }
+
+    private func isSilencePlaceholderText(_ text: String) -> Bool {
+        let compact = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+        guard !compact.isEmpty else { return false }
+        return compact.allSatisfy { $0 == "." || $0 == "…" || $0 == "⋯" }
+    }
+
 
     private func show(rendered context: RenderedLineContext, isPlaying: Bool) {
         show(
@@ -417,6 +505,7 @@ final class DesktopLyricsController {
             lineElapsed: context.lineElapsed,
             previousLineDuration: context.previousLineDuration,
             nextLineDuration: context.nextLineDuration,
+            wordTimings: context.wordTimings,
             isPlaying: isPlaying
         )
     }
@@ -431,6 +520,7 @@ final class DesktopLyricsController {
         lineElapsed: TimeInterval = 0,
         previousLineDuration: TimeInterval? = nil,
         nextLineDuration: TimeInterval? = nil,
+        wordTimings: [DesktopLyricWordTiming] = [],
         isPlaying: Bool = true
     ) {
         if settings.isDesktopLyricsSurfaceEnabled {
@@ -443,6 +533,7 @@ final class DesktopLyricsController {
                 lineElapsed: lineElapsed,
                 previousLineDuration: previousLineDuration,
                 nextLineDuration: nextLineDuration,
+                wordTimings: wordTimings,
                 isPlaying: isPlaying
             )
         } else {
@@ -460,6 +551,7 @@ final class DesktopLyricsController {
                 lineElapsed: lineElapsed,
                 previousLineDuration: previousLineDuration,
                 nextLineDuration: nextLineDuration,
+                wordTimings: wordTimings,
                 isPlaying: isPlaying
             )
         } else {
@@ -476,6 +568,7 @@ final class DesktopLyricsController {
                 lineElapsed: lineElapsed,
                 previousLineDuration: previousLineDuration,
                 nextLineDuration: nextLineDuration,
+                wordTimings: wordTimings,
                 isPlaying: isPlaying
             )
         } else {

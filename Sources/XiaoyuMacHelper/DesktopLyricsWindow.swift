@@ -68,6 +68,7 @@ final class DesktopLyricsWindow: FloatingOverlayPanel {
         lineElapsed: TimeInterval = 0,
         previousLineDuration: TimeInterval? = nil,
         nextLineDuration: TimeInterval? = nil,
+        wordTimings: [DesktopLyricWordTiming] = [],
         isPlaying: Bool = true
     ) {
         let cleanPrimary = primary.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -85,6 +86,7 @@ final class DesktopLyricsWindow: FloatingOverlayPanel {
             elapsed: lineElapsed,
             previousDuration: previousLineDuration,
             nextDuration: nextLineDuration,
+            wordTimings: wordTimings,
             isPlaying: isPlaying
         )
 
@@ -286,6 +288,7 @@ private final class DesktopLyricsView: NSView {
         elapsed: TimeInterval,
         previousDuration: TimeInterval?,
         nextDuration: TimeInterval?,
+        wordTimings: [DesktopLyricWordTiming] = [],
         isPlaying: Bool = true
     ) {
         primaryLabel.syncLineTiming(
@@ -294,6 +297,7 @@ private final class DesktopLyricsView: NSView {
             elapsed: elapsed,
             previousDuration: previousDuration,
             nextDuration: nextDuration,
+            wordTimings: wordTimings,
             isPlaying: isPlaying
         )
         translationLabel.syncLineTiming(
@@ -302,6 +306,7 @@ private final class DesktopLyricsView: NSView {
             elapsed: elapsed,
             previousDuration: previousDuration,
             nextDuration: nextDuration,
+            wordTimings: [],
             isPlaying: isPlaying
         )
     }

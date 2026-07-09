@@ -7,7 +7,7 @@ let package = Package(
         .macOS(.v26)
     ],
     products: [
-        .executable(name: "Xiaoyu MacHelper", targets: ["XiaoyuMacHelper"])
+        .executable(name: "XiaoyuMacHelper", targets: ["XiaoyuMacHelper"])
     ],
     targets: [
         .executableTarget(

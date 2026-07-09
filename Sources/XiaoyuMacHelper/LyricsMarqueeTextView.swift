@@ -421,90 +421,22 @@ final class LyricsMarqueeTextView: NSView {
     private func renderTimedFrame(at timestamp: CFTimeInterval, duration: CFTimeInterval, maxOffset: CGFloat) {
         let elapsed = predictedElapsed(now: timestamp, duration: duration)
         let plan = timedScrollPlan(duration: duration, maxOffset: maxOffset)
+        let progress = clamp(elapsed / max(0.001, plan.travelDuration), 0, 1)
 
         renderedAlpha = 1
-
-        guard plan.targetOffset > 1, plan.travelDuration > 0.05 else {
+        guard plan.targetOffset > 1 else {
             renderedOffset = 0
             return
         }
 
-        if elapsed <= plan.startDelay {
-            renderedOffset = 0
-            return
-        }
-
-        if elapsed >= plan.travelEnd {
-            renderedOffset = plan.targetOffset
-            return
-        }
-
-        let progress = (elapsed - plan.startDelay) / plan.travelDuration
-        renderedOffset = plan.targetOffset * CGFloat(adaptiveScrollEase(progress))
+        renderedOffset = plan.targetOffset * CGFloat(formulaTimelineProgress(progress, rampFraction: 0.055))
     }
 
     private func timedScrollPlan(duration: CFTimeInterval, maxOffset: CGFloat) -> TimedScrollPlan {
-        let visibleWidth = max(1, bounds.width)
-        let overflowRatio = CFTimeInterval(min(3.0, maxOffset / visibleWidth))
-        let fontSize = CFTimeInterval(max(12, font.pointSize))
-        let textLength = CFTimeInterval(max(1, stringValue.count))
-        let complexity = min(1.35, max(0.55, textLength / 34.0))
-
-        // Mainstream desktop lyrics should feel readable first and mechanical second:
-        // 1. choose a comfortable natural speed from font size + overflow pressure;
-        // 2. finish early when the line has enough time;
-        // 3. only compress the holds / speed up when the line is short;
-        // 4. never force extreme speed just to hit the very end before the next lyric.
-        let comfortableSpeed = clamp(
-            fontSize * (0.95 + 0.16 * complexity) + 14.0 + overflowRatio * 12.0,
-            34.0,
-            92.0
-        )
-        let maximumReadableSpeed = clamp(comfortableSpeed * 1.72, 62.0, 148.0)
-
-        let normalHeadHold = clamp(
-            0.42 + duration * 0.08 - overflowRatio * 0.12,
-            0.18,
-            min(1.05, duration * 0.26)
-        )
-        let normalTailHold = clamp(
-            0.24 + duration * 0.055,
-            0.16,
-            min(0.82, duration * 0.20)
-        )
-        let naturalTravelDuration = CFTimeInterval(maxOffset) / comfortableSpeed
-        let naturalAvailable = max(0.08, duration - normalHeadHold - normalTailHold)
-
-        if naturalTravelDuration <= naturalAvailable {
-            return TimedScrollPlan(
-                startDelay: normalHeadHold,
-                travelDuration: max(0.12, naturalTravelDuration),
-                targetOffset: maxOffset
-            )
-        }
-
-        let compressedHeadHold = clamp(duration * (0.055 + 0.025 / max(0.7, overflowRatio + 0.5)), 0.08, 0.40)
-        let compressedTailHold = clamp(duration * 0.045, 0.06, 0.24)
-        let compressedAvailable = max(0.10, duration - compressedHeadHold - compressedTailHold)
-        let requiredSpeed = CFTimeInterval(maxOffset) / compressedAvailable
-
-        if requiredSpeed <= maximumReadableSpeed {
-            return TimedScrollPlan(
-                startDelay: compressedHeadHold,
-                travelDuration: compressedAvailable,
-                targetOffset: maxOffset
-            )
-        }
-
-        // For extremely long text in a short lyric line, forcing the end would look like a stock
-        // ticker. Move only as much as can be read naturally, prioritizing smoothness over a rushed
-        // full reveal. Long enough future lines will still reveal fully by the branch above.
-        let readableOffset = CGFloat(maximumReadableSpeed * compressedAvailable)
-        let targetOffset = min(maxOffset, max(maxOffset * 0.42, readableOffset))
-        return TimedScrollPlan(
-            startDelay: compressedHeadHold,
-            travelDuration: compressedAvailable,
-            targetOffset: min(maxOffset, targetOffset)
+        TimedScrollPlan(
+            startDelay: 0,
+            travelDuration: clamp(duration, 0.14, 45.0),
+            targetOffset: maxOffset
         )
     }
 
@@ -603,20 +535,37 @@ final class LyricsMarqueeTextView: NSView {
     }
 
     private func adaptiveScrollEase(_ value: CFTimeInterval) -> CFTimeInterval {
-        let t = min(1, max(0, value))
-        // Smooth but not sluggish: slower at the head for readability, a stable middle section,
-        // then a soft landing at the tail. This avoids both linear ticker motion and late snapping.
-        if t < 0.18 {
-            return 0.18 * smootherStep(t / 0.18)
+        formulaTimelineProgress(value, rampFraction: 0.055)
+    }
+
+    private func formulaTimelineProgress(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
+        let t = clamp(value, 0, 1)
+        let ramp = clamp(rampFraction, 0.018, 0.20)
+        let totalArea = max(0.001, 1 - ramp)
+        if t < ramp {
+            let u = t / ramp
+            return ramp * smoothstepIntegral(u) / totalArea
         }
-        if t > 0.82 {
-            return 0.82 + 0.18 * smootherStep((t - 0.82) / 0.18)
+        if t > 1 - ramp {
+            let u = (t - (1 - ramp)) / ramp
+            let beforeTail = 0.5 * ramp + (1 - 2 * ramp)
+            let tailArea = ramp * (u - smoothstepIntegral(u))
+            return (beforeTail + tailArea) / totalArea
         }
-        return t
+        return (0.5 * ramp + (t - ramp)) / totalArea
     }
 
     private func clamp(_ value: CFTimeInterval, _ lower: CFTimeInterval, _ upper: CFTimeInterval) -> CFTimeInterval {
         min(max(value, lower), upper)
+    }
+
+    private func smoothstepIntegral(_ value: CFTimeInterval) -> CFTimeInterval {
+        let t = min(1, max(0, value))
+        let t2 = t * t
+        let t4 = t2 * t2
+        let t5 = t4 * t
+        let t6 = t5 * t
+        return t6 - 3 * t5 + 2.5 * t4
     }
 
     private func smootherStep(_ value: CFTimeInterval) -> CFTimeInterval {

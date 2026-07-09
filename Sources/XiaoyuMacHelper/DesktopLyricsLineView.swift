@@ -25,6 +25,7 @@ final class DesktopLyricsLineView: NSView {
     var stringValue: String = "" {
         didSet {
             guard oldValue != stringValue else { return }
+            captureOutgoingLineIfNeeded(oldValue: oldValue, newValue: stringValue)
             resetTextCaches()
             resetLineState(keepsTiming: false)
         }
@@ -125,6 +126,12 @@ final class DesktopLyricsLineView: NSView {
         var durationBucket: Int
         var previousBucket: Int
         var nextBucket: Int
+        var wordTimingBucket: Int
+    }
+
+    private struct WordScrollAnchor {
+        var time: CFTimeInterval
+        var offset: CGFloat
     }
 
     private struct TimedScrollPlan {
@@ -135,8 +142,33 @@ final class DesktopLyricsLineView: NSView {
         var targetOffset: CGFloat
         var rampFraction: CFTimeInterval
         var leadInOffset: CGFloat
+        var repeatCount: Int
+        var repeatStride: CGFloat
+        var wordAnchors: [WordScrollAnchor]
 
         var travelEnd: CFTimeInterval { startDelay + travelDuration }
+    }
+
+    private struct RenderSample {
+        var offset: CGFloat
+        var alpha: CGFloat
+        var repeatCount: Int
+        var repeatStride: CGFloat
+    }
+
+    private struct OutgoingLine {
+        var attributed: NSAttributedString
+        var textSize: NSSize
+        var typographicBounds: NSRect
+        var textRect: NSRect
+        var alignment: NSTextAlignment
+        var usesTypographicVerticalCentering: Bool
+        var offset: CGFloat
+        var alpha: CGFloat
+        var repeatCount: Int
+        var repeatStride: CGFloat
+        var startedAt: CFTimeInterval
+        var duration: CFTimeInterval
     }
 
     private struct UntimedState {
@@ -171,10 +203,15 @@ final class DesktopLyricsLineView: NSView {
     private var measuredTypographicBounds: NSRect = .zero
     private var activeDisplayLink: CADisplayLink?
     private var displayLinkTarget: DesktopLyricsDisplayLinkTarget?
+    private var displayTimestamp: CFTimeInterval = CACurrentMediaTime()
     private var cachedPlan: TimedScrollPlan?
-    private var timedOffsetMemory: (identity: TimeInterval?, maxOffset: CGFloat, offset: CGFloat)?
+    private var timedOffsetMemory: (identity: TimeInterval?, maxOffset: CGFloat, offset: CGFloat, timestamp: CFTimeInterval)?
+    private var wordTimings: [DesktopLyricWordTiming] = []
     private var untimedState = UntimedState()
     private var untimedPausedAt: CFTimeInterval?
+    private var outgoingLine: OutgoingLine?
+    private let lineCrossfadeDuration: CFTimeInterval = 0.24
+    private var edgeFadeGradients: (left: CGGradient, right: CGGradient)?
 
     override var isOpaque: Bool { false }
 
@@ -234,6 +271,7 @@ final class DesktopLyricsLineView: NSView {
         elapsed: TimeInterval,
         previousDuration: TimeInterval?,
         nextDuration: TimeInterval?,
+        wordTimings: [DesktopLyricWordTiming] = [],
         isPlaying: Bool = true
     ) {
         let now = CACurrentMediaTime()
@@ -241,6 +279,13 @@ final class DesktopLyricsLineView: NSView {
         let normalizedDuration = normalizedDuration(duration)
         let normalizedPrevious = normalizedNeighborDuration(previousDuration)
         let normalizedNext = normalizedNeighborDuration(nextDuration)
+        let normalizedWords = normalizedWordTimings(wordTimings, duration: normalizedDuration)
+        let wordsChanged = normalizedWords != self.wordTimings
+        if wordsChanged {
+            self.wordTimings = normalizedWords
+            timedOffsetMemory = nil
+            invalidateScrollPlan()
+        }
         let normalizedElapsed = normalizedDuration.map { min(max(0, elapsed), $0) } ?? max(0, elapsed)
         let shouldFreezeTiming = !isPlaying
         let visualElapsedBeforeUpdate = timing.elapsed(at: now, isPaused: timingIsPaused)
@@ -311,6 +356,13 @@ final class DesktopLyricsLineView: NSView {
                 timing.rate = 1.0
                 timedOffsetMemory = nil
                 invalidateScrollPlan()
+            } else if abs(drift) < 0.24 {
+                // Ordinary polling jitter should not keep changing the velocity bias.  Rebase to
+                // the current visual frame and run at normal speed; pixel alignment handles the
+                // remaining sub-pixel noise at draw time.
+                timing.elapsedAtSync = predicted
+                timing.syncedAt = now
+                timing.rate = 1.0
             } else {
                 // Never correct ordinary polling drift by moving the offset immediately. Keep the
                 // current position as the base and use a small speed bias to catch up or slow down.
@@ -336,6 +388,7 @@ final class DesktopLyricsLineView: NSView {
         super.draw(dirtyRect)
         guard !stringValue.isEmpty, bounds.width > 2, bounds.height > 2 else { return }
 
+        let now = CACurrentMediaTime()
         let attributed = attributedString()
         let textSize = measuredSize(for: attributed)
         let textRect = protectedTextRect()
@@ -344,20 +397,47 @@ final class DesktopLyricsLineView: NSView {
         let sample = renderSample(maxOffset: maxOffset, shouldScroll: shouldScroll)
         let x = drawingOriginX(textWidth: textSize.width, shouldScroll: shouldScroll, offset: sample.offset, textRect: textRect)
         let y = drawingOriginY(for: attributed, measuredSize: textSize)
+        let transition = activeOutgoingLine(at: now)
+        let incomingAlpha = transition.map { CGFloat(crossfadeProgress(now: now, transition: $0)) } ?? 1
 
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: bounds).addClip()
 
         if let context = NSGraphicsContext.current?.cgContext {
-            context.beginTransparencyLayer(auxiliaryInfo: nil)
-            if sample.alpha < 0.999 {
-                context.setAlpha(sample.alpha)
+            if let transition {
+                let progress = CGFloat(crossfadeProgress(now: now, transition: transition))
+                let outgoingX = drawingOriginX(
+                    textWidth: transition.textSize.width,
+                    shouldScroll: transition.textSize.width > transition.textRect.width + 8,
+                    offset: transition.offset,
+                    textRect: transition.textRect,
+                    alignment: transition.alignment
+                )
+                let outgoingY = drawingOriginY(
+                    for: transition.attributed,
+                    measuredSize: transition.textSize,
+                    typographicBounds: transition.typographicBounds,
+                    usesTypographicVerticalCentering: transition.usesTypographicVerticalCentering
+                )
+                drawAttributedLine(
+                    transition.attributed,
+                    at: NSPoint(x: outgoingX, y: outgoingY),
+                    alpha: transition.alpha * (1 - progress),
+                    shouldApplyEdgeFade: transition.textSize.width > transition.textRect.width + 8,
+                    repeatCount: transition.repeatCount,
+                    repeatStride: transition.repeatStride,
+                    in: context
+                )
             }
-            attributed.draw(at: NSPoint(x: x, y: y))
-            if shouldScroll {
-                applyEdgeFade(in: context)
-            }
-            context.endTransparencyLayer()
+            drawAttributedLine(
+                attributed,
+                at: NSPoint(x: x, y: y),
+                alpha: sample.alpha * incomingAlpha,
+                shouldApplyEdgeFade: shouldScroll,
+                repeatCount: sample.repeatCount,
+                repeatStride: sample.repeatStride,
+                in: context
+            )
         } else {
             attributed.draw(at: NSPoint(x: x, y: y))
         }
@@ -366,31 +446,53 @@ final class DesktopLyricsLineView: NSView {
     }
 
     private func drawingOriginY(for attributed: NSAttributedString, measuredSize: NSSize) -> CGFloat {
+        drawingOriginY(
+            for: attributed,
+            measuredSize: measuredSize,
+            typographicBounds: typographicBounds(for: attributed),
+            usesTypographicVerticalCentering: usesTypographicVerticalCentering
+        )
+    }
+
+    private func drawingOriginY(
+        for attributed: NSAttributedString,
+        measuredSize: NSSize,
+        typographicBounds: NSRect,
+        usesTypographicVerticalCentering: Bool
+    ) -> CGFloat {
         guard usesTypographicVerticalCentering,
               attributed.length > 0,
               let effectiveFont = attributed.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
         else {
-            return floor((bounds.height - measuredSize.height) / 2)
+            return pixelAligned(floor((bounds.height - measuredSize.height) / 2))
         }
 
         // attributed.size() discards the vertical origin of the glyph box. When the font-size
         // slider changes, different fonts report different ascender/descender offsets, so only
         // centering by height makes the lyric look high or low. Center the actual typographic box.
-        let textBounds = typographicBounds(for: attributed)
+        let textBounds = typographicBounds
         let fontBounds = effectiveFont.boundingRectForFont
         let sourceBounds = textBounds.height > 0 ? textBounds : fontBounds
-        return floor(bounds.midY - sourceBounds.midY)
+        return pixelAligned(floor(bounds.midY - sourceBounds.midY))
     }
 
-    private func renderSample(maxOffset: CGFloat, shouldScroll: Bool) -> (offset: CGFloat, alpha: CGFloat) {
-        guard shouldScroll else { return (0, 1) }
-        let now = CACurrentMediaTime()
+    private func renderSample(maxOffset: CGFloat, shouldScroll: Bool) -> RenderSample {
+        if isSilencePlaceholderText(stringValue) {
+            return RenderSample(offset: 0, alpha: 1, repeatCount: 1, repeatStride: 0)
+        }
+        guard shouldScroll else { return RenderSample(offset: 0, alpha: 1, repeatCount: 1, repeatStride: 0) }
+        let now = renderTimestamp()
         if let duration = timing.duration, timingIsFresh {
             let plan = scrollPlan(duration: duration, maxOffset: maxOffset)
-            return (timedOffset(at: now, plan: plan), 1)
+            return RenderSample(
+                offset: timedOffset(at: now, plan: plan),
+                alpha: 1,
+                repeatCount: plan.repeatCount,
+                repeatStride: plan.repeatStride
+            )
         }
         if timingIsPaused {
-            return (untimedState.offset, untimedState.alpha)
+            return RenderSample(offset: untimedState.offset, alpha: untimedState.alpha, repeatCount: 1, repeatStride: 0)
         }
         return untimedSample(at: now, maxOffset: maxOffset)
     }
@@ -460,6 +562,12 @@ final class DesktopLyricsLineView: NSView {
     private func attributedString() -> NSAttributedString {
         if let attributedCache { return attributedCache }
 
+        let attributed = makeAttributedString(for: stringValue)
+        attributedCache = attributed
+        return attributed
+    }
+
+    private func makeAttributedString(for text: String) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = alignment
         paragraph.lineBreakMode = .byClipping
@@ -478,9 +586,7 @@ final class DesktopLyricsLineView: NSView {
             attributes[.shadow] = textShadow
         }
 
-        let attributed = NSAttributedString(string: stringValue, attributes: attributes)
-        attributedCache = attributed
-        return attributed
+        return NSAttributedString(string: text, attributes: attributes)
     }
 
     private func measuredSize(for attributed: NSAttributedString) -> NSSize {
@@ -508,11 +614,63 @@ final class DesktopLyricsLineView: NSView {
         invalidateScrollPlan()
     }
 
+    private func captureOutgoingLineIfNeeded(oldValue: String, newValue: String) {
+        let oldText = oldValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newText = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !oldText.isEmpty, !newText.isEmpty, bounds.width > 2, bounds.height > 2 else {
+            outgoingLine = nil
+            return
+        }
+        if isSilencePlaceholderText(oldText), isSilencePlaceholderText(newText) {
+            outgoingLine = nil
+            return
+        }
+
+        let now = CACurrentMediaTime()
+        let attributed = attributedCache ?? makeAttributedString(for: oldValue)
+        let measured = measuredTextSize == .zero ? measuredSize(for: attributed) : measuredTextSize
+        let typographic = measuredTypographicBounds == .zero ? typographicBounds(for: attributed) : measuredTypographicBounds
+        let textRect = protectedTextRect()
+        let maxOffset = max(0, measured.width - textRect.width)
+        let shouldScroll = maxOffset > 8
+        let sample = renderSample(maxOffset: maxOffset, shouldScroll: shouldScroll)
+
+        outgoingLine = OutgoingLine(
+            attributed: attributed,
+            textSize: measured,
+            typographicBounds: typographic,
+            textRect: textRect,
+            alignment: alignment,
+            usesTypographicVerticalCentering: usesTypographicVerticalCentering,
+            offset: sample.offset,
+            alpha: sample.alpha,
+            repeatCount: sample.repeatCount,
+            repeatStride: sample.repeatStride,
+            startedAt: now,
+            duration: lineCrossfadeDuration
+        )
+    }
+
+    private func activeOutgoingLine(at timestamp: CFTimeInterval) -> OutgoingLine? {
+        guard let outgoingLine else { return nil }
+        if timestamp - outgoingLine.startedAt >= outgoingLine.duration {
+            self.outgoingLine = nil
+            return nil
+        }
+        return outgoingLine
+    }
+
+    private func crossfadeProgress(now: CFTimeInterval, transition: OutgoingLine) -> CFTimeInterval {
+        let linear = clamp((now - transition.startedAt) / max(0.001, transition.duration), 0, 1)
+        return smootherStep(linear)
+    }
+
     private func resetLineState(keepsTiming: Bool) {
         untimedState = UntimedState(phase: .headHold, phaseStartedAt: CACurrentMediaTime(), resetSwapped: false, offset: 0, alpha: 1)
         cachedPlan = nil
         timedOffsetMemory = nil
         if !keepsTiming {
+            wordTimings = []
             timing = LineTiming(identity: nil, duration: nil, previousDuration: nil, nextDuration: nil, elapsedAtSync: 0, syncedAt: CACurrentMediaTime(), rate: 1.0)
             timingIsFresh = false
             timingIsPaused = false
@@ -534,7 +692,9 @@ final class DesktopLyricsLineView: NSView {
         }
         let textWidth = measuredSize(for: attributedString()).width
         let textWidthLimit = protectedTextRect().width
-        if !timingIsPaused, !stringValue.isEmpty, bounds.width > 2, textWidth > textWidthLimit + 8 {
+        let needsTransitionFrames = outgoingLine != nil
+        let isStablePlaceholder = isSilencePlaceholderText(stringValue)
+        if !timingIsPaused, !stringValue.isEmpty, bounds.width > 2, (needsTransitionFrames || (!isStablePlaceholder && textWidth > textWidthLimit + 8)) {
             startDisplayDriverIfNeeded()
         } else {
             stopDisplayDriver()
@@ -544,8 +704,10 @@ final class DesktopLyricsLineView: NSView {
 
     private func startDisplayDriverIfNeeded() {
         guard activeDisplayLink == nil else { return }
+        displayTimestamp = CACurrentMediaTime()
         let target = DesktopLyricsDisplayLinkTarget(view: self)
         let link = displayLink(target: target, selector: #selector(DesktopLyricsDisplayLinkTarget.displayLinkDidFire(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
         link.add(to: .main, forMode: .common)
         link.isPaused = false
         displayLinkTarget = target
@@ -559,7 +721,19 @@ final class DesktopLyricsLineView: NSView {
     }
 
     fileprivate func displayLinkDidFire(_ link: CADisplayLink) {
+        // Use the actual display-link timestamp, not the predicted target timestamp.
+        // The target timestamp can wobble slightly when the system changes refresh pacing, which
+        // is especially visible as tiny acceleration/deceleration in very slow lyric scrolling.
+        displayTimestamp = link.timestamp > 0 ? link.timestamp : CACurrentMediaTime()
+        if let outgoingLine, displayTimestamp - outgoingLine.startedAt >= outgoingLine.duration {
+            self.outgoingLine = nil
+            updateAnimationState()
+        }
         needsDisplay = true
+    }
+
+    private func renderTimestamp() -> CFTimeInterval {
+        activeDisplayLink == nil ? CACurrentMediaTime() : displayTimestamp
     }
 
     private func protectedTextRect() -> NSRect {
@@ -568,17 +742,59 @@ final class DesktopLyricsLineView: NSView {
     }
 
     private func drawingOriginX(textWidth: CGFloat, shouldScroll: Bool, offset: CGFloat, textRect: NSRect) -> CGFloat {
+        drawingOriginX(textWidth: textWidth, shouldScroll: shouldScroll, offset: offset, textRect: textRect, alignment: alignment)
+    }
+
+    private func drawingOriginX(
+        textWidth: CGFloat,
+        shouldScroll: Bool,
+        offset: CGFloat,
+        textRect: NSRect,
+        alignment: NSTextAlignment
+    ) -> CGFloat {
         guard shouldScroll else {
             switch alignment {
             case .left, .natural, .justified:
-                return textRect.minX
+                return pixelAligned(textRect.minX)
             case .right:
-                return max(textRect.minX, textRect.maxX - textWidth)
+                return pixelAligned(max(textRect.minX, textRect.maxX - textWidth))
             default:
-                return max(textRect.minX, floor(textRect.midX - textWidth / 2))
+                return pixelAligned(max(textRect.minX, floor(textRect.midX - textWidth / 2)))
             }
         }
+        // Do not pixel-snap moving lyrics. At slow word-by-word speeds the offset advances by
+        // less than one physical pixel per frame; rounding that value produces a visible
+        // stop/jump cadence. Keep static text pixel-aligned, but let scrolling text move on
+        // sub-pixels so Core Graphics can anti-alias the motion smoothly.
         return textRect.minX - offset
+    }
+
+    private func drawAttributedLine(
+        _ attributed: NSAttributedString,
+        at origin: NSPoint,
+        alpha: CGFloat,
+        shouldApplyEdgeFade: Bool,
+        repeatCount: Int,
+        repeatStride: CGFloat,
+        in context: CGContext
+    ) {
+        guard alpha > 0.001 else { return }
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        if alpha < 0.999 {
+            context.setAlpha(alpha)
+        }
+
+        let copies = max(1, repeatCount)
+        let stride = repeatStride > 1 ? repeatStride : 0
+        for index in 0..<copies {
+            let repeatedX = origin.x + CGFloat(index) * stride
+            attributed.draw(at: NSPoint(x: repeatedX, y: origin.y))
+        }
+
+        if shouldApplyEdgeFade {
+            applyEdgeFade(in: context)
+        }
+        context.endTransparencyLayer()
     }
 
     private func scrollPlan(duration: CFTimeInterval, maxOffset: CGFloat) -> TimedScrollPlan {
@@ -588,121 +804,44 @@ final class DesktopLyricsLineView: NSView {
         }
 
         let visibleWidth = max(1, protectedTextRect().width)
-        let overflowRatio = clamp(CFTimeInterval(maxOffset / visibleWidth), 0.03, 6.0)
-        let fontSize = CFTimeInterval(max(12, font.pointSize))
+        let textWidth = visibleWidth + maxOffset
         let current = clamp(duration, 0.14, 42.0)
-        let previous = timing.previousDuration ?? current
-        let next = timing.nextDuration ?? current
-        let rhythm = weightedRhythm(previous: previous, current: current, next: next)
-        let characterCount = CFTimeInterval(max(1, stringValue.count))
-
-        // Tempo/readability pressures.  The planner now treats tail hold as a real budget item,
-        // not a leftover.  This prevents the old "arrived and instantly switched" feeling.
-        let tempoPressure = clamp((2.35 - rhythm) / 1.55, 0, 1)
-        let slowSection = clamp((rhythm - 3.70) / 4.60, 0, 1)
-        let shortLinePressure = clamp((1.35 - current) / 0.95, 0, 1)
-        let overflowPressure = clamp((overflowRatio - 0.20) / 1.70, 0, 1)
-        let densityPressure = clamp((characterCount / max(0.42, current) - 7.0) / 17.0, 0, 1)
-        let urgency = clamp(
-            max(tempoPressure * 0.95, shortLinePressure, overflowPressure * 0.68, densityPressure * 0.72),
-            0,
-            1
+        let repeatCount = timedRepeatCount(
+            duration: current,
+            viewportWidth: visibleWidth,
+            textWidth: textWidth,
+            maxOffset: maxOffset
+        )
+        let repeatGap = repeatGapWidth(viewportWidth: visibleWidth)
+        let repeatStride = repeatCount > 1 ? ceil(textWidth + repeatGap) : 0
+        let effectiveTargetOffset = maxOffset + CGFloat(max(0, repeatCount - 1)) * repeatStride
+        let wordAnchors = wordScrollAnchors(duration: current, viewportWidth: visibleWidth, maxOffset: effectiveTargetOffset)
+        let rampFraction = formulaRampFraction(
+            lineDuration: current,
+            viewportWidth: visibleWidth,
+            textWidth: textWidth,
+            maxOffset: effectiveTargetOffset
         )
 
-        // The parser may show the next line a tiny bit before its timestamp.  Account for that so
-        // this line reaches the end and visibly rests before the visual switch happens.
-        let switchReserve = clamp(current * 0.010, 0.002, 0.024)
-        let usableDuration = max(0.080, current - switchReserve)
-
-        // Readability speed is the preferred middle-section speed.  The deadline can force a
-        // higher speed, but only after head hold has been compressed and a small tail rest has been
-        // protected.
-        let readableSpeed = clamp(
-            fontSize * (1.18 + overflowRatio * 0.080)
-                + 32.0
-                + tempoPressure * 20.0
-                + densityPressure * 18.0
-                - slowSection * 7.0,
-            52.0,
-            154.0
-        )
-
-        // Head hold should be short and prepared; tail hold should be perceptible.  For very fast
-        // lines the tail can be tiny, but it is still preserved before the next lyric appears.
-        let relaxedHeadHold = clamp(current * (0.070 + slowSection * 0.018), 0.070, 0.320)
-        let compactHeadHold = clamp(current * (0.012 + overflowPressure * 0.004), 0.003, 0.055)
-        var headHold = mix(relaxedHeadHold, compactHeadHold, urgency)
-        headHold = clamp(headHold - tempoPressure * 0.026 - overflowPressure * 0.016, 0.002, usableDuration * 0.24)
-
-        let desiredTailHold = clamp(current * (0.115 + slowSection * 0.038), 0.145, 0.520)
-        let compactTailHold = clamp(current * (0.060 - shortLinePressure * 0.018), 0.034, 0.125)
-        var tailHold = mix(desiredTailHold, compactTailHold, urgency)
-        tailHold = clamp(tailHold, 0.030, usableDuration * 0.40)
-
-        // Reserve a little more tail for ordinary lines.  This is the direct fix for the perceived
-        // haste: when there is enough time, arrive early and let the tail sit briefly.
-        let naturalTravel = CFTimeInterval(maxOffset) / max(1, readableSpeed)
-        let ordinaryLine = urgency < 0.72 && current > 1.25
-        if ordinaryLine {
-            let extraTail = min(usableDuration * 0.070, max(0, usableDuration - headHold - tailHold - naturalTravel) * 0.66)
-            tailHold += max(0, extraTail)
-        }
-
-        // If the line is too short, preserve tail first, then reduce head hold.  Only after that do
-        // we compress the tail.  The result is a scan that still lands before the visual switch.
-        var travelBudget = usableDuration - headHold - tailHold
-        if travelBudget < 0.055 {
-            headHold = min(headHold, max(0.002, usableDuration * 0.040))
-            travelBudget = usableDuration - headHold - tailHold
-        }
-        if travelBudget < 0.055 {
-            let protectedTail = clamp(usableDuration * 0.075, 0.026, 0.080)
-            tailHold = min(tailHold, protectedTail)
-            travelBudget = usableDuration - headHold - tailHold
-        }
-        if travelBudget < 0.045 {
-            headHold = max(0.001, usableDuration * 0.020)
-            tailHold = max(0.012, usableDuration * 0.045)
-            travelBudget = max(0.038, usableDuration - headHold - tailHold)
-        }
-
-        // Finish slightly before the computed deadline.  Normal/slow lines scroll at a readable
-        // pace and may finish much earlier; fast lines use almost the full travel budget but still
-        // keep the protected tail hold.
-        let earlyFinishBias = clamp(0.090 + slowSection * 0.060 - urgency * 0.055, 0.020, 0.155)
-        let preferredTravelCap = max(0.038, travelBudget * (1.0 - earlyFinishBias))
-        let minimumTravel = clamp(0.095 + overflowPressure * 0.030 - shortLinePressure * 0.045, 0.040, 0.300)
-        let travelDuration = clamp(naturalTravel, min(minimumTravel, preferredTravelCap), preferredTravelCap)
-
-        // If naturalTravel is longer than the cap, clamp() above intentionally accelerates the
-        // middle section.  The display remains smooth because the velocity envelope is continuous.
-        let actualSpeed = CFTimeInterval(maxOffset) / max(0.001, travelDuration)
-        let speedPressure = clamp((actualSpeed - readableSpeed) / max(1.0, readableSpeed * 2.2), 0, 1)
-        let rampFraction = clamp(
-            0.170
-                + slowSection * 0.030
-                - tempoPressure * 0.038
-                - shortLinePressure * 0.046
-                - speedPressure * 0.052,
-            0.045,
-            0.230
-        )
-
-        // If we gained spare time because natural scrolling was shorter than the cap, put most of
-        // it after arrival instead of before departure.  This creates the desired "early arrive,
-        // quiet tail, then next line" rhythm.
-        let spare = max(0, travelBudget - travelDuration)
-        let finalStartDelay = max(0.001, headHold + spare * 0.10)
-        let finalTailHold = max(0.012, tailHold + spare * 0.82)
-
+        // Timed lyrics now use a direct visual-time formula.  There is no separate head hold,
+        // travel phase, or tail hold: every rendered frame maps the current line's elapsed time to
+        // a deterministic offset.  This is the actual marquee model:
+        //   offsetPx = scrollablePx * progress(lineElapsedMs / lineDurationMs,
+        //                                      viewportWidthPx,
+        //                                      textWidthPx)
+        // Keeping the whole line duration in the formula prevents the old behavior where long
+        // lyrics scrolled quickly to the end and then waited for the next line.
         let plan = TimedScrollPlan(
             signature: signature,
-            startDelay: finalStartDelay,
-            travelDuration: max(0.035, travelDuration),
-            tailHold: finalTailHold,
-            targetOffset: maxOffset,
+            startDelay: 0,
+            travelDuration: current,
+            tailHold: 0,
+            targetOffset: effectiveTargetOffset,
             rampFraction: rampFraction,
-            leadInOffset: 0
+            leadInOffset: 0,
+            repeatCount: repeatCount,
+            repeatStride: repeatStride,
+            wordAnchors: wordAnchors
         )
         cachedPlan = plan
         return plan
@@ -715,8 +854,9 @@ final class DesktopLyricsLineView: NSView {
             textWidthBucket: Int((maxOffset / 2).rounded()),
             fontBucket: Int((font.pointSize * 10).rounded()),
             durationBucket: bucket(timing.duration ?? duration),
-            previousBucket: bucket(timing.previousDuration ?? duration),
-            nextBucket: bucket(timing.nextDuration ?? duration)
+            previousBucket: 0,
+            nextBucket: 0,
+            wordTimingBucket: wordTimingBucket()
         )
     }
 
@@ -727,43 +867,60 @@ final class DesktopLyricsLineView: NSView {
     private func timedOffset(at timestamp: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
         let elapsed = timing.elapsed(at: timestamp, isPaused: timingIsPaused)
         let rawOffset: CGFloat
-        if elapsed <= plan.startDelay {
-            // Keep the head hold truly still; the non-linear curve itself handles the soft start.
-            let warmup = clamp(elapsed / max(0.001, plan.startDelay), 0, 1)
-            rawOffset = plan.leadInOffset * CGFloat(easeOutCubic(warmup))
-        } else if elapsed >= plan.travelEnd {
-            rawOffset = plan.targetOffset
+        if !plan.wordAnchors.isEmpty {
+            rawOffset = fluidWordTimedOffset(elapsed: elapsed, plan: plan)
         } else {
-            let progress = clamp((elapsed - plan.startDelay) / max(0.001, plan.travelDuration), 0, 1)
-            let curve = CGFloat(readableMotionCurve(progress, rampFraction: plan.rampFraction))
-            let remainingDistance = max(0, plan.targetOffset - plan.leadInOffset)
-            rawOffset = plan.leadInOffset + remainingDistance * curve
+            let progress = clamp(elapsed / max(0.001, plan.travelDuration), 0, 1)
+            let curve = CGFloat(lineTimelineProgress(progress, rampFraction: plan.rampFraction))
+            rawOffset = plan.targetOffset * curve
         }
-        return continuousTimedOffset(rawOffset, maxOffset: plan.targetOffset)
+        return continuousTimedOffset(rawOffset, maxOffset: plan.targetOffset, at: timestamp)
     }
 
-    private func continuousTimedOffset(_ rawOffset: CGFloat, maxOffset: CGFloat) -> CGFloat {
+    private func continuousTimedOffset(_ rawOffset: CGFloat, maxOffset: CGFloat, at timestamp: CFTimeInterval) -> CGFloat {
         let clampedOffset = min(max(0, rawOffset), maxOffset)
         guard !timingIsPaused else {
-            timedOffsetMemory = (timing.identity, maxOffset, clampedOffset)
+            timedOffsetMemory = (timing.identity, maxOffset, clampedOffset, timestamp)
             return clampedOffset
         }
 
-        if let memory = timedOffsetMemory {
-            let sameIdentity = !didLineIdentityChange(from: memory.identity, to: timing.identity)
-            let sameDistance = abs(memory.maxOffset - maxOffset) <= 2.0
-            if sameIdentity && sameDistance {
-                let stabilized = max(memory.offset, clampedOffset)
-                timedOffsetMemory = (timing.identity, maxOffset, stabilized)
-                return stabilized
-            }
+        guard let memory = timedOffsetMemory else {
+            timedOffsetMemory = (timing.identity, maxOffset, clampedOffset, timestamp)
+            return clampedOffset
         }
 
-        timedOffsetMemory = (timing.identity, maxOffset, clampedOffset)
-        return clampedOffset
+        let sameIdentity = !didLineIdentityChange(from: memory.identity, to: timing.identity)
+        let sameDistance = abs(memory.maxOffset - maxOffset) <= 2.0
+        let deltaTime = timestamp - memory.timestamp
+        guard sameIdentity, sameDistance, deltaTime >= 0, deltaTime <= 0.24 else {
+            timedOffsetMemory = (timing.identity, maxOffset, clampedOffset, timestamp)
+            return clampedOffset
+        }
+
+        // Keep normal playback monotonic, but do not snap tiny word-lyric movements to the
+        // target. Snapping a 0.03~0.06 px delta is exactly what makes slow scrolling look like
+        // stop-start motion. Word mode now uses a lighter one-frame damper and only hard-snaps
+        // at the very end of the line.
+        let monotonicTarget = max(memory.offset, clampedOffset)
+        let hasWordTiming = !wordTimings.isEmpty
+        let smoothingTime = hasWordTiming ? 0.040 : 0.026
+        let factor = 1 - exp(-clamp(deltaTime, 0.001, 0.050) / smoothingTime)
+        var stabilized = memory.offset + (monotonicTarget - memory.offset) * CGFloat(factor)
+        if hasWordTiming {
+            if maxOffset - monotonicTarget < 0.30 {
+                stabilized = monotonicTarget
+            }
+        } else {
+            let snapDistance: CGFloat = 0.14
+            if monotonicTarget - stabilized < snapDistance {
+                stabilized = monotonicTarget
+            }
+        }
+        timedOffsetMemory = (timing.identity, maxOffset, stabilized, timestamp)
+        return stabilized
     }
 
-    private func untimedSample(at timestamp: CFTimeInterval, maxOffset: CGFloat) -> (offset: CGFloat, alpha: CGFloat) {
+    private func untimedSample(at timestamp: CFTimeInterval, maxOffset: CGFloat) -> RenderSample {
         let elapsed = timestamp - untimedState.phaseStartedAt
         let travelDuration = max(1.25, CFTimeInterval(maxOffset / max(18, fallbackScrollSpeed)))
 
@@ -811,7 +968,7 @@ final class DesktopLyricsLineView: NSView {
                 untimedState.resetSwapped = false
             }
         }
-        return (untimedState.offset, untimedState.alpha)
+        return RenderSample(offset: untimedState.offset, alpha: untimedState.alpha, repeatCount: 1, repeatStride: 0)
     }
 
 
@@ -843,70 +1000,334 @@ final class DesktopLyricsLineView: NSView {
         return clampedPrevious * 0.22 + clampedCurrent * 0.56 + clampedNext * 0.22
     }
 
-    private func readableMotionCurve(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
-        let t = clamp(value, 0, 1)
-        let ramp = clamp(rampFraction, 0.045, 0.42)
-        guard ramp < 0.49 else { return smootherStep(t) }
+    private func timedRepeatCount(
+        duration: CFTimeInterval,
+        viewportWidth: CGFloat,
+        textWidth: CGFloat,
+        maxOffset: CGFloat
+    ) -> Int {
+        if isSilencePlaceholderText(stringValue) || !wordTimings.isEmpty { return 1 }
+        let visible = max(1, CFTimeInterval(viewportWidth))
+        let total = max(visible, CFTimeInterval(textWidth))
+        let scrollable = max(0, CFTimeInterval(maxOffset))
+        guard scrollable > 8 else { return 1 }
 
-        // Integrated minimum-jerk velocity envelope:
-        // - velocity and acceleration ease in at the start,
-        // - the middle stays almost constant for readable lyric motion,
-        // - velocity and acceleration ease out before the protected tail hold.
-        // This avoids both segmented linear jerk and the floating feel of a full-interval ease.
-        let totalArea = 1 - ramp
-        if t < ramp {
-            let u = t / ramp
-            return ramp * smoothstepIntegral(u) / totalArea
+        // Repeat-count planning is intentionally based on the two stable dimensions of a timed
+        // lyric line:
+        //   1. the line's total duration;
+        //   2. the full text length / visible viewport length.
+        // It no longer uses raw pixel speed as the primary trigger.  That keeps the decision tied
+        // to the lyric itself and avoids tiny width/timing jitter flipping the copy count.
+        let lengthRatio = clamp(total / visible, 1.0, 7.5)
+        let overflowRatio = max(0.0, lengthRatio - 1.0)
+
+        // Do not enter repeated mode for ordinary short lines.  Wider text is already visually
+        // moving across more content, so it needs a little more time before we allow repetition.
+        let minimumRepeatDuration = 5.55 + min(1.65, overflowRatio) * 0.72
+        guard duration >= minimumRepeatDuration else { return 1 }
+
+        let gapRatio = CFTimeInterval(repeatGapWidth(viewportWidth: viewportWidth)) / visible
+        let strideUnits = max(1.0, lengthRatio + gapRatio)
+
+        // The maximum grows slowly with total line time.  This makes repetition an n-copy model
+        // instead of a hard-coded 2/3-copy model, while still preventing sudden high-copy jumps.
+        let durationHeadroom = max(0, duration - minimumRepeatDuration)
+        let maxRepeatsByDuration = min(8, max(1, 2 + Int(floor(durationHeadroom / 3.15))))
+
+        var repeats = 1
+        while repeats < maxRepeatsByDuration {
+            let currentUnits = max(0.12, overflowRatio + CFTimeInterval(repeats - 1) * strideUnits)
+            let secondsPerViewportUnit = duration / currentUnits
+
+            // Higher repeat levels require stronger evidence.  This small progressive threshold is
+            // the anti-sensitivity buffer: hovering near a boundary should stay at the lower count.
+            let levelPenalty = CFTimeInterval(repeats - 1) * 0.34
+            let widthRelief = min(0.92, overflowRatio * 0.34)
+            let entryThreshold = 4.25 + levelPenalty + widthRelief
+
+            guard secondsPerViewportUnit > entryThreshold else { break }
+            repeats += 1
         }
-        if t > 1 - ramp {
-            let u = (1 - t) / ramp
-            let tailArea = ramp * smoothstepIntegral(u)
-            return 1 - tailArea / totalArea
+
+        return repeats
+    }
+
+    private func repeatGapWidth(viewportWidth: CGFloat) -> CGFloat {
+        let fontScaled = font.pointSize * 2.35
+        let viewportScaled = viewportWidth * 0.075
+        return ceil(min(max(fontScaled, 42), max(58, viewportScaled)))
+    }
+
+    private func formulaRampFraction(
+        lineDuration: CFTimeInterval,
+        viewportWidth: CGFloat,
+        textWidth: CGFloat,
+        maxOffset: CGFloat
+    ) -> CFTimeInterval {
+        let visible = max(1, CFTimeInterval(viewportWidth))
+        let total = max(visible, CFTimeInterval(textWidth))
+        let scrollable = max(0, CFTimeInterval(maxOffset))
+        let overflowRatio = clamp(scrollable / visible, 0, 6.0)
+        let coverageRatio = clamp(scrollable / total, 0, 0.96)
+        let shortLinePressure = clamp((1.25 - lineDuration) / 0.95, 0, 1)
+        let longLineEase = clamp((lineDuration - 4.0) / 8.0, 0, 1)
+
+        // The ramp is part of the formula, not a separate delay.  It only shapes velocity at the
+        // two ends while the offset still progresses across the full lyric duration.
+        return clamp(
+            0.055
+                + longLineEase * 0.070
+                + coverageRatio * 0.040
+                - overflowRatio * 0.012
+                - shortLinePressure * 0.030,
+            0.018,
+            0.155
+        )
+    }
+
+    private func lineTimelineProgress(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
+        let startRamp = clamp(rampFraction * 1.42 + 0.010, 0.040, 0.190)
+        let endRamp = clamp(rampFraction * 0.92 + 0.006, 0.030, 0.145)
+        return asymmetricTimelineProgress(value, startRamp: startRamp, endRamp: endRamp)
+    }
+
+    private func asymmetricTimelineProgress(_ value: CFTimeInterval, startRamp: CFTimeInterval, endRamp: CFTimeInterval) -> CFTimeInterval {
+        let t = clamp(value, 0, 1)
+        let start = clamp(startRamp, 0.001, 0.42)
+        let end = clamp(endRamp, 0.001, min(0.42, 0.92 - start))
+        let totalArea = max(0.001, 1 - (start + end) / 2)
+        if t < start {
+            let u = t / start
+            return start * smoothstepIntegral(u) / totalArea
         }
-        return (0.5 * ramp + (t - ramp)) / totalArea
+        if t > 1 - end {
+            let u = (t - (1 - end)) / end
+            let beforeTail = 0.5 * start + (1 - start - end)
+            let tailArea = end * (u - smoothstepIntegral(u))
+            return (beforeTail + tailArea) / totalArea
+        }
+        return (0.5 * start + (t - start)) / totalArea
+    }
+
+    private func readableMotionCurve(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
+        lineTimelineProgress(value, rampFraction: rampFraction)
+    }
+
+    private func normalizedWordTimings(_ timings: [DesktopLyricWordTiming], duration: CFTimeInterval?) -> [DesktopLyricWordTiming] {
+        let textLength = stringValue.utf16.count
+        guard textLength > 0, !timings.isEmpty else { return [] }
+        let maxEnd = duration ?? timings.map(\.end).max() ?? 0
+        return timings.filter { timing in
+            timing.start.isFinite
+                && timing.end.isFinite
+                && timing.end > timing.start + 0.015
+                && timing.start >= -0.020
+                && timing.end <= maxEnd + 0.75
+                && timing.utf16Location >= 0
+                && timing.utf16Length > 0
+                && timing.utf16End <= textLength
+        }
+        .map { timing in
+            DesktopLyricWordTiming(start: max(0, timing.start), end: min(maxEnd, timing.end), utf16Location: timing.utf16Location, utf16Length: timing.utf16Length)
+        }
+        .sorted { lhs, rhs in
+            if abs(lhs.start - rhs.start) > 0.0005 { return lhs.start < rhs.start }
+            return lhs.utf16Location < rhs.utf16Location
+        }
+    }
+
+    private func wordTimingBucket() -> Int {
+        guard !wordTimings.isEmpty else { return 0 }
+        var hash = wordTimings.count &* 31
+        for timing in wordTimings.prefix(10) {
+            hash = hash &* 31 &+ Int((timing.start * 20).rounded())
+            hash = hash &* 31 &+ Int((timing.end * 20).rounded())
+            hash = hash &* 31 &+ timing.utf16Location
+            hash = hash &* 31 &+ timing.utf16Length
+        }
+        if let last = wordTimings.last {
+            hash = hash &* 31 &+ Int((last.end * 20).rounded())
+            hash = hash &* 31 &+ last.utf16End
+        }
+        return hash
+    }
+
+    private func wordScrollAnchors(duration: CFTimeInterval, viewportWidth: CGFloat, maxOffset: CGFloat) -> [WordScrollAnchor] {
+        guard !wordTimings.isEmpty, maxOffset > 8, viewportWidth > 8 else { return [] }
+        let nsText = stringValue as NSString
+        let preferredCenter = viewportWidth * 0.48
+        var anchors: [WordScrollAnchor] = [WordScrollAnchor(time: 0, offset: 0)]
+        var lastOffset: CGFloat = 0
+        for timing in wordTimings {
+            guard timing.utf16End <= nsText.length else { continue }
+            let prefix = nsText.substring(with: NSRange(location: 0, length: timing.utf16Location))
+            let segment = nsText.substring(with: NSRange(location: timing.utf16Location, length: timing.utf16Length))
+            let segmentCenter = measuredInlineWidth(prefix) + measuredInlineWidth(segment) / 2
+            let rawTarget = min(maxOffset, max(lastOffset, segmentCenter - preferredCenter))
+            let target = max(lastOffset, rawTarget)
+            let anchorTime = clamp(mix(timing.start, timing.end, 0.35), 0, duration)
+            let minimumVisualStep = max(3.5, min(7.0, font.pointSize * 0.16))
+            if let previous = anchors.last, anchorTime - previous.time < 0.018 {
+                anchors[anchors.count - 1] = WordScrollAnchor(time: previous.time, offset: max(previous.offset, target))
+            } else if target - (anchors.last?.offset ?? 0) >= minimumVisualStep || target >= maxOffset - 1.0 {
+                anchors.append(WordScrollAnchor(time: anchorTime, offset: target))
+            }
+            lastOffset = max(lastOffset, target)
+        }
+        if let last = anchors.last, duration - last.time > 0.050, maxOffset - last.offset > 1.5 {
+            anchors.append(WordScrollAnchor(time: duration, offset: maxOffset))
+        }
+        return anchors.count > 1 ? anchors : []
+    }
+
+    private func measuredInlineWidth(_ text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        return makeAttributedString(for: text).size().width
+    }
+
+    private func fluidWordTimedOffset(elapsed: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
+        let progress = clamp(elapsed / max(0.001, plan.travelDuration), 0, 1)
+
+        // Word anchors are useful for keeping the currently sung word in a readable area, but using
+        // them as the full scroll path creates small acceleration pockets between words. Make the
+        // line-duration formula the main motion, then let the word anchors only guide it softly.
+        let continuousCurve = lineTimelineProgress(
+            progress,
+            rampFraction: min(plan.rampFraction, 0.050)
+        )
+        let continuousOffset = plan.targetOffset * CGFloat(continuousCurve)
+        let guidedOffset = wordTimedOffset(elapsed: elapsed, plan: plan)
+        let durationPressure = clamp((plan.travelDuration - 2.2) / 7.0, 0, 1)
+        let guideWeight = CGFloat(0.34 - durationPressure * 0.14)
+        let blended = continuousOffset * (1 - guideWeight) + guidedOffset * guideWeight
+
+        // Preserve forward-only motion without letting a single late word anchor force a visible
+        // jump. The damper in continuousTimedOffset will finish the small catch-up smoothly.
+        return min(max(0, blended), plan.targetOffset)
+    }
+
+    private func wordTimedOffset(elapsed: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
+        let anchors = plan.wordAnchors
+        guard let first = anchors.first else { return 0 }
+        let safeElapsed = clamp(elapsed, 0, plan.travelDuration)
+        if safeElapsed <= first.time { return first.offset }
+
+        for index in 1..<anchors.count {
+            let next = anchors[index]
+            if safeElapsed <= next.time {
+                return monotoneHermiteOffset(
+                    at: safeElapsed,
+                    anchors: anchors,
+                    segmentEndIndex: index
+                )
+            }
+        }
+        return anchors.last?.offset ?? 0
+    }
+
+    private func monotoneHermiteOffset(
+        at time: CFTimeInterval,
+        anchors: [WordScrollAnchor],
+        segmentEndIndex index: Int
+    ) -> CGFloat {
+        let previous = anchors[index - 1]
+        let next = anchors[index]
+        let span = max(0.001, next.time - previous.time)
+        let distance = next.offset - previous.offset
+        guard distance > 0.10 else { return previous.offset }
+
+        let currentSlope = CGFloat(distance) / CGFloat(span)
+        let incomingSlope: CGFloat
+        if index >= 2 {
+            let incoming = anchors[index - 1].offset - anchors[index - 2].offset
+            let incomingTime = max(0.001, anchors[index - 1].time - anchors[index - 2].time)
+            incomingSlope = max(0, CGFloat(incoming) / CGFloat(incomingTime))
+        } else {
+            incomingSlope = currentSlope
+        }
+
+        let outgoingSlope: CGFloat
+        if index + 1 < anchors.count {
+            let outgoing = anchors[index + 1].offset - anchors[index].offset
+            let outgoingTime = max(0.001, anchors[index + 1].time - anchors[index].time)
+            outgoingSlope = max(0, CGFloat(outgoing) / CGFloat(outgoingTime))
+        } else {
+            outgoingSlope = currentSlope
+        }
+
+        let maxSlope = currentSlope * 2.85
+        let slope0 = min(maxSlope, max(0, (incomingSlope + currentSlope) * 0.5))
+        let slope1 = min(maxSlope, max(0, (currentSlope + outgoingSlope) * 0.5))
+        let u = CGFloat(clamp((time - previous.time) / span, 0, 1))
+        let u2 = u * u
+        let u3 = u2 * u
+        let h00 = 2 * u3 - 3 * u2 + 1
+        let h10 = u3 - 2 * u2 + u
+        let h01 = -2 * u3 + 3 * u2
+        let h11 = u3 - u2
+        let value = h00 * previous.offset
+            + h10 * CGFloat(span) * slope0
+            + h01 * next.offset
+            + h11 * CGFloat(span) * slope1
+        return min(max(previous.offset, value), next.offset)
     }
 
     private func applyEdgeFade(in context: CGContext) {
         let fade = min(max(0, fadeEdgeWidth), bounds.width / 3)
         guard fade > 1 else { return }
 
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard
-            let leftGradient = CGGradient(
-                colorsSpace: colorSpace,
-                colors: [
-                    NSColor.black.withAlphaComponent(0.88).cgColor,
-                    NSColor.black.withAlphaComponent(0.0).cgColor
-                ] as CFArray,
-                locations: [0, 1]
-            ),
-            let rightGradient = CGGradient(
-                colorsSpace: colorSpace,
-                colors: [
-                    NSColor.black.withAlphaComponent(0.0).cgColor,
-                    NSColor.black.withAlphaComponent(0.88).cgColor
-                ] as CFArray,
-                locations: [0, 1]
-            )
-        else {
-            return
+        let gradients: (left: CGGradient, right: CGGradient)
+        if let cached = edgeFadeGradients {
+            gradients = cached
+        } else {
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            guard
+                let leftGradient = CGGradient(
+                    colorsSpace: colorSpace,
+                    colors: [
+                        NSColor.black.withAlphaComponent(0.88).cgColor,
+                        NSColor.black.withAlphaComponent(0.0).cgColor
+                    ] as CFArray,
+                    locations: [0, 1]
+                ),
+                let rightGradient = CGGradient(
+                    colorsSpace: colorSpace,
+                    colors: [
+                        NSColor.black.withAlphaComponent(0.0).cgColor,
+                        NSColor.black.withAlphaComponent(0.88).cgColor
+                    ] as CFArray,
+                    locations: [0, 1]
+                )
+            else {
+                return
+            }
+            gradients = (leftGradient, rightGradient)
+            edgeFadeGradients = gradients
         }
 
         context.saveGState()
         context.setBlendMode(.destinationOut)
         context.drawLinearGradient(
-            leftGradient,
+            gradients.left,
             start: CGPoint(x: bounds.minX, y: bounds.midY),
             end: CGPoint(x: bounds.minX + fade, y: bounds.midY),
             options: []
         )
         context.drawLinearGradient(
-            rightGradient,
+            gradients.right,
             start: CGPoint(x: bounds.maxX - fade, y: bounds.midY),
             end: CGPoint(x: bounds.maxX, y: bounds.midY),
             options: []
         )
         context.restoreGState()
+    }
+
+    private func isSilencePlaceholderText(_ text: String) -> Bool {
+        let compact = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+        guard !compact.isEmpty else { return false }
+        return compact.allSatisfy { $0 == "." || $0 == "…" || $0 == "⋯" }
     }
 
     private func mix(_ a: CFTimeInterval, _ b: CFTimeInterval, _ amount: CFTimeInterval) -> CFTimeInterval {
@@ -916,6 +1337,11 @@ final class DesktopLyricsLineView: NSView {
 
     private func clamp(_ value: CFTimeInterval, _ lower: CFTimeInterval, _ upper: CFTimeInterval) -> CFTimeInterval {
         min(max(value, lower), upper)
+    }
+
+    private func pixelAligned(_ value: CGFloat) -> CGFloat {
+        let scale = max(1, layer?.contentsScale ?? window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
+        return (value * scale).rounded() / scale
     }
 
     private func smoothstepIntegral(_ value: CFTimeInterval) -> CFTimeInterval {

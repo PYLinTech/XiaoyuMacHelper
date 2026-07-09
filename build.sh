@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="Xiaoyu MacHelper"
+APP_NAME="XiaoyuMacHelper"
 APP_VERSION="${APP_VERSION:-1.0}"
 APP_BUILD="${APP_BUILD:-1}"
 BUILD_DIR="$ROOT_DIR/.build/release"
@@ -27,11 +27,11 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>Xiaoyu MacHelper</string>
+  <string>XiaoyuMacHelper</string>
   <key>CFBundleIdentifier</key>
   <string>local.xiaoyu-mac-helper</string>
   <key>CFBundleName</key>
-  <string>Xiaoyu MacHelper</string>
+  <string>XiaoyuMacHelper</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>

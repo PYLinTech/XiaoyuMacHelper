@@ -119,6 +119,8 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let dynamicIslandLyricsFontSizeLabel = NSTextField(labelWithString: "字体大小：")
     private let dynamicIslandLyricsFontSizeValueLabel = NSTextField(labelWithString: "")
     private let dynamicIslandLyricsFontSizeSlider = NSSlider(value: 15, minValue: 11, maxValue: 64, target: nil, action: nil)
+    private let dynamicIslandLyricsAlignmentLabel = NSTextField(labelWithString: "歌词对齐方式：")
+    private let dynamicIslandLyricsAlignmentPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let menuBarLyricsCheckbox = NSButton(checkboxWithTitle: "任务栏歌词", target: nil, action: nil)
     private let menuBarLyricsSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "任务栏歌词设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let menuBarLyricsWidthLabel = NSTextField(labelWithString: "任务栏歌词宽度：")
@@ -182,6 +184,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     var onDynamicIslandLyricsCornerRatioChanged: ((Double) -> Void)?
     var onDynamicIslandLyricsFontSizeChanged: ((Double) -> Void)?
     var onDynamicIslandLyricsFontNameChanged: ((String) -> Void)?
+    var onDynamicIslandLyricsAlignmentChanged: ((LyricsTextAlignment) -> Void)?
     var onMenuBarLyricsChanged: ((Bool) -> Void)?
     var onMenuBarLyricsWidthChanged: ((Double) -> Void)?
     var onMenuBarLyricsAlignmentChanged: ((LyricsTextAlignment) -> Void)?
@@ -403,16 +406,18 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         desktopLyricsLanguagePopup.action = #selector(desktopLyricsLanguageSelected)
         settingsContentView.addSubview(desktopLyricsLanguagePopup)
 
-        [desktopLyricsAlignmentPopup, menuBarLyricsAlignmentPopup].forEach { popup in
+        [desktopLyricsAlignmentPopup, dynamicIslandLyricsAlignmentPopup, menuBarLyricsAlignmentPopup].forEach { popup in
             popup.addItems(withTitles: LyricsTextAlignment.allCases.map(\.title))
             popup.bezelStyle = .glass
             settingsContentView.addSubview(popup)
         }
         desktopLyricsAlignmentPopup.target = self
         desktopLyricsAlignmentPopup.action = #selector(desktopLyricsAlignmentSelected)
+        dynamicIslandLyricsAlignmentPopup.target = self
+        dynamicIslandLyricsAlignmentPopup.action = #selector(dynamicIslandLyricsAlignmentSelected)
         menuBarLyricsAlignmentPopup.target = self
         menuBarLyricsAlignmentPopup.action = #selector(menuBarLyricsAlignmentSelected)
-        [desktopLyricsStyleLabel, desktopLyricsFontLabel, desktopLyricsFontSizeLabel, desktopLyricsFontSizeValueLabel, desktopLyricsTextColorLabel, desktopLyricsStrokeColorLabel, desktopLyricsStrokeWidthLabel, desktopLyricsStrokeWidthValueLabel, desktopLyricsWidthLabel, desktopLyricsWidthValueLabel, desktopLyricsAlignmentLabel, dynamicIslandLyricsWidthLabel, dynamicIslandLyricsWidthValueLabel, dynamicIslandLyricsBlankWidthLabel, dynamicIslandLyricsBlankWidthValueLabel, dynamicIslandLyricsHeightLabel, dynamicIslandLyricsHeightValueLabel, dynamicIslandLyricsSlantRatioLabel, dynamicIslandLyricsSlantRatioValueLabel, dynamicIslandLyricsCornerRatioLabel, dynamicIslandLyricsCornerRatioValueLabel, dynamicIslandLyricsFontLabel, dynamicIslandLyricsFontSizeLabel, dynamicIslandLyricsFontSizeValueLabel, menuBarLyricsWidthLabel, menuBarLyricsWidthValueLabel, menuBarLyricsAlignmentLabel, musicLyricsWhitelistLabel, lyricsSourceLabel].forEach { label in
+        [desktopLyricsStyleLabel, desktopLyricsFontLabel, desktopLyricsFontSizeLabel, desktopLyricsFontSizeValueLabel, desktopLyricsTextColorLabel, desktopLyricsStrokeColorLabel, desktopLyricsStrokeWidthLabel, desktopLyricsStrokeWidthValueLabel, desktopLyricsWidthLabel, desktopLyricsWidthValueLabel, desktopLyricsAlignmentLabel, dynamicIslandLyricsWidthLabel, dynamicIslandLyricsWidthValueLabel, dynamicIslandLyricsBlankWidthLabel, dynamicIslandLyricsBlankWidthValueLabel, dynamicIslandLyricsHeightLabel, dynamicIslandLyricsHeightValueLabel, dynamicIslandLyricsSlantRatioLabel, dynamicIslandLyricsSlantRatioValueLabel, dynamicIslandLyricsCornerRatioLabel, dynamicIslandLyricsCornerRatioValueLabel, dynamicIslandLyricsFontLabel, dynamicIslandLyricsFontSizeLabel, dynamicIslandLyricsFontSizeValueLabel, dynamicIslandLyricsAlignmentLabel, menuBarLyricsWidthLabel, menuBarLyricsWidthValueLabel, menuBarLyricsAlignmentLabel, musicLyricsWhitelistLabel, lyricsSourceLabel].forEach { label in
             label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
             label.textColor = .labelColor
             settingsContentView.addSubview(label)
@@ -787,6 +792,12 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     @objc private func dynamicIslandLyricsFontSelected() {
         let title = dynamicIslandLyricsFontPopup.titleOfSelectedItem ?? ""
         onDynamicIslandLyricsFontNameChanged?(title == "系统默认" ? "" : title)
+    }
+
+    @objc private func dynamicIslandLyricsAlignmentSelected() {
+        let index = dynamicIslandLyricsAlignmentPopup.indexOfSelectedItem
+        guard LyricsTextAlignment.allCases.indices.contains(index) else { return }
+        onDynamicIslandLyricsAlignmentChanged?(LyricsTextAlignment.allCases[index])
     }
 
     @objc private func menuBarLyricsWidthChanged() {
@@ -1473,6 +1484,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
             dynamicIslandLyricsCornerRatioLabel, dynamicIslandLyricsCornerRatioSlider, dynamicIslandLyricsCornerRatioValueLabel,
             dynamicIslandLyricsFontSizeLabel, dynamicIslandLyricsFontSizeSlider, dynamicIslandLyricsFontSizeValueLabel,
             dynamicIslandLyricsFontLabel, dynamicIslandLyricsFontPopup,
+            dynamicIslandLyricsAlignmentLabel, dynamicIslandLyricsAlignmentPopup,
             dynamicIslandLyricsSpectrumCheckbox, dynamicIslandLyricsHideOnHoverCheckbox
         )
         prepareSettingsContent(minimumHeight: 430)
@@ -1536,7 +1548,16 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
             width: contentWidth - dynamicIslandLyricsFontLabel.frame.width - 10,
             height: 32
         )
-        y = dynamicIslandLyricsFontPopup.frame.minY - 36
+        y = dynamicIslandLyricsFontPopup.frame.minY - 34
+        dynamicIslandLyricsAlignmentLabel.sizeToFit()
+        dynamicIslandLyricsAlignmentLabel.frame.origin = NSPoint(x: contentX, y: y)
+        dynamicIslandLyricsAlignmentPopup.frame = NSRect(
+            x: dynamicIslandLyricsAlignmentLabel.frame.maxX + 10,
+            y: dynamicIslandLyricsAlignmentLabel.frame.midY - 16,
+            width: 130,
+            height: 32
+        )
+        y = dynamicIslandLyricsAlignmentPopup.frame.minY - 36
         dynamicIslandLyricsSpectrumCheckbox.sizeToFit()
         dynamicIslandLyricsSpectrumCheckbox.frame.origin = NSPoint(x: contentX, y: y)
         layoutCheckbox(dynamicIslandLyricsHideOnHoverCheckbox, below: dynamicIslandLyricsSpectrumCheckbox.frame, gap: 34, contentX: contentX)
@@ -1702,6 +1723,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         dynamicIslandLyricsCornerRatioLabel, dynamicIslandLyricsCornerRatioSlider, dynamicIslandLyricsCornerRatioValueLabel,
         dynamicIslandLyricsFontLabel, dynamicIslandLyricsFontPopup,
         dynamicIslandLyricsFontSizeLabel, dynamicIslandLyricsFontSizeSlider, dynamicIslandLyricsFontSizeValueLabel,
+        dynamicIslandLyricsAlignmentLabel, dynamicIslandLyricsAlignmentPopup,
         menuBarLyricsWidthLabel, menuBarLyricsWidthSlider, menuBarLyricsWidthValueLabel, menuBarLyricsAlignmentLabel, menuBarLyricsAlignmentPopup,
         desktopLyricsTranslationCheckbox, desktopLyricsLockCheckbox,
         desktopLyricsStyleLabel, desktopLyricsStylePopup,
@@ -1803,6 +1825,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         dynamicIslandLyricsCornerRatioValueLabel.stringValue = "\(Int(round(dynamicIslandLyricsCornerRatioSlider.doubleValue)))"
         dynamicIslandLyricsFontSizeSlider.doubleValue = settings.dynamicIslandLyricsFontSize
         dynamicIslandLyricsFontSizeValueLabel.stringValue = "\(Int(round(settings.dynamicIslandLyricsFontSize)))"
+        dynamicIslandLyricsAlignmentPopup.selectItem(at: LyricsTextAlignment.allCases.firstIndex(of: settings.dynamicIslandLyricsAlignment) ?? 0)
         if settings.dynamicIslandLyricsFontName.isEmpty {
             dynamicIslandLyricsFontPopup.selectItem(withTitle: "系统默认")
         } else if dynamicIslandLyricsFontPopup.item(withTitle: settings.dynamicIslandLyricsFontName) != nil {

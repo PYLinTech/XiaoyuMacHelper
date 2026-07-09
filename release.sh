@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="Xiaoyu MacHelper"
+APP_NAME="XiaoyuMacHelper"
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
 RELEASE_DIR="$ROOT_DIR/release"
 STAGING_DIR="$ROOT_DIR/.release-staging"

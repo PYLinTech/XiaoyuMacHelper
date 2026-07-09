@@ -27,6 +27,7 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
     var onDynamicIslandLyricsCornerRatioChanged: ((Double) -> Void)?
     var onDynamicIslandLyricsFontSizeChanged: ((Double) -> Void)?
     var onDynamicIslandLyricsFontNameChanged: ((String) -> Void)?
+    var onDynamicIslandLyricsAlignmentChanged: ((LyricsTextAlignment) -> Void)?
     var onMenuBarLyricsChanged: ((Bool) -> Void)?
     var onMenuBarLyricsWidthChanged: ((Double) -> Void)?
     var onMenuBarLyricsAlignmentChanged: ((LyricsTextAlignment) -> Void)?
@@ -104,6 +105,7 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
         controlView.onDynamicIslandLyricsCornerRatioChanged = { [weak self] ratio in self?.onDynamicIslandLyricsCornerRatioChanged?(ratio) }
         controlView.onDynamicIslandLyricsFontSizeChanged = { [weak self] fontSize in self?.onDynamicIslandLyricsFontSizeChanged?(fontSize) }
         controlView.onDynamicIslandLyricsFontNameChanged = { [weak self] fontName in self?.onDynamicIslandLyricsFontNameChanged?(fontName) }
+        controlView.onDynamicIslandLyricsAlignmentChanged = { [weak self] alignment in self?.onDynamicIslandLyricsAlignmentChanged?(alignment) }
         controlView.onMenuBarLyricsChanged = { [weak self] isEnabled in self?.onMenuBarLyricsChanged?(isEnabled) }
         controlView.onMenuBarLyricsWidthChanged = { [weak self] width in self?.onMenuBarLyricsWidthChanged?(width) }
         controlView.onMenuBarLyricsAlignmentChanged = { [weak self] alignment in self?.onMenuBarLyricsAlignmentChanged?(alignment) }

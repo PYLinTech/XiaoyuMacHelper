@@ -39,15 +39,52 @@ struct DesktopLyricsTrack: Equatable, Sendable {
     }
 }
 
+struct DesktopLyricWordTiming: Equatable, Sendable {
+    let start: TimeInterval
+    let end: TimeInterval
+    let utf16Location: Int
+    let utf16Length: Int
+
+    var utf16End: Int { utf16Location + utf16Length }
+}
+
 struct DesktopLyricLine: Equatable, Sendable {
     let time: TimeInterval
     let text: String
     let translation: String?
+    let endTime: TimeInterval?
+    let wordTimings: [DesktopLyricWordTiming]
 
-    init(time: TimeInterval, text: String, translation: String? = nil) {
+    init(
+        time: TimeInterval,
+        text: String,
+        translation: String? = nil,
+        endTime: TimeInterval? = nil,
+        wordTimings: [DesktopLyricWordTiming] = []
+    ) {
         self.time = time
         self.text = text
         self.translation = translation?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        if let endTime, endTime.isFinite, endTime > time + 0.12 {
+            self.endTime = endTime
+        } else {
+            self.endTime = nil
+        }
+
+        let textLength = text.utf16.count
+        self.wordTimings = wordTimings
+            .filter { timing in
+                timing.start.isFinite
+                    && timing.end.isFinite
+                    && timing.end > timing.start + 0.015
+                    && timing.utf16Location >= 0
+                    && timing.utf16Length > 0
+                    && timing.utf16End <= textLength
+            }
+            .sorted { lhs, rhs in
+                if abs(lhs.start - rhs.start) > 0.0005 { return lhs.start < rhs.start }
+                return lhs.utf16Location < rhs.utf16Location
+            }
     }
 }
 
@@ -61,6 +98,9 @@ struct DesktopLyricLineContext: Equatable, Sendable {
 }
 
 enum DesktopLyricsParser {
+    private static let silencePlaceholderText = "..."
+    private static let longSilencePlaceholderThreshold: TimeInterval = 5.0
+
     static func parseLRC(_ rawText: String) -> [DesktopLyricLine] {
         let lines = rawText.components(separatedBy: .newlines)
         var result: [DesktopLyricLine] = []
@@ -90,7 +130,7 @@ enum DesktopLyricsParser {
             }
         }
 
-        return normalized(result)
+        return normalized(result, insertsLeadingPlaceholder: true)
     }
 
     static func parseTTML(_ rawText: String) -> [DesktopLyricLine] {
@@ -103,13 +143,16 @@ enum DesktopLyricsParser {
         ), let beginRegex = try? NSRegularExpression(
             pattern: #"\bbegin\s*=\s*[\"']([^\"']+)[\"']"#,
             options: [.caseInsensitive]
-        ), let lineBreakRegex = try? NSRegularExpression(pattern: #"<br\s*/?>"#, options: [.caseInsensitive]),
-           let tagRegex = try? NSRegularExpression(pattern: #"<[^>]+>"#, options: []) else {
+        ), let endRegex = try? NSRegularExpression(
+            pattern: #"\bend\s*=\s*[\"']([^\"']+)[\"']"#,
+            options: [.caseInsensitive]
+        ) else {
             return []
         }
 
         let fullRange = NSRange(normalizedText.startIndex..<normalizedText.endIndex, in: normalizedText)
         let paragraphs = paragraphRegex.matches(in: normalizedText, range: fullRange)
+        let leadingSilence = parseTTMLLeadingSilence(in: normalizedText)
         var result: [DesktopLyricLine] = []
 
         for paragraph in paragraphs {
@@ -118,20 +161,17 @@ enum DesktopLyricsParser {
             guard let beginMatch = beginRegex.firstMatch(in: attributes, range: attrRange) else { continue }
             let begin = substring(attributes, nsRange: beginMatch.range(at: 1))
             guard let time = parseTime(begin) else { continue }
+            let explicitEndTime = endRegex.firstMatch(in: attributes, range: attrRange)
+                .flatMap { parseTime(substring(attributes, nsRange: $0.range(at: 1))) }
 
             let body = substring(normalizedText, nsRange: paragraph.range(at: 2))
-            let bodyRange = NSRange(body.startIndex..<body.endIndex, in: body)
-            let withLineBreakSpaces = lineBreakRegex.stringByReplacingMatches(in: body, range: bodyRange, withTemplate: " ")
-            let tagRange = NSRange(withLineBreakSpaces.startIndex..<withLineBreakSpaces.endIndex, in: withLineBreakSpaces)
-            let withoutTags = tagRegex.stringByReplacingMatches(in: withLineBreakSpaces, range: tagRange, withTemplate: "")
-            let text = decodeEntities(withoutTags)
-                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { continue }
-            result.append(DesktopLyricLine(time: time, text: text))
+            let parsedBody = parseTTMLParagraphBody(body, lineStart: time)
+            guard !parsedBody.text.isEmpty else { continue }
+            let endTime = explicitEndTime ?? parsedBody.absoluteEndTime
+            result.append(DesktopLyricLine(time: time, text: parsedBody.text, endTime: endTime, wordTimings: parsedBody.wordTimings))
         }
 
-        return normalized(result)
+        return normalized(result, leadingSilence: leadingSilence, insertsLeadingPlaceholder: true, insertsInterludePlaceholders: true)
     }
 
     static func merge(primary: [DesktopLyricLine], translation: [DesktopLyricLine]) -> [DesktopLyricLine] {
@@ -142,7 +182,7 @@ enum DesktopLyricsParser {
             let translationLine = translation.min { abs($0.time - line.time) < abs($1.time - line.time) }
             let translatedText = translationLine.flatMap { abs($0.time - line.time) <= 0.75 ? $0.text : nil }
             if let translatedText, translatedText != line.text {
-                merged.append(DesktopLyricLine(time: line.time, text: line.text, translation: translatedText))
+                merged.append(DesktopLyricLine(time: line.time, text: line.text, translation: translatedText, endTime: line.endTime, wordTimings: line.wordTimings))
             } else {
                 merged.append(line)
             }
@@ -167,6 +207,7 @@ enum DesktopLyricsParser {
     static func lineIndex(in lines: [DesktopLyricLine], at elapsedTime: TimeInterval) -> Int? {
         guard !lines.isEmpty else { return nil }
         let safeTime = elapsedTime.isFinite ? max(0, elapsedTime) : 0
+        guard safeTime + 0.001 >= lines[lines.startIndex].time else { return nil }
         var lower = lines.startIndex
         var upper = lines.endIndex
 
@@ -198,17 +239,26 @@ enum DesktopLyricsParser {
             nextTime = trackDuration
         }
 
-        let rawDuration = nextTime.map { max(0, $0 - line.time) }
+        let lineEndTime = validEndTime(line.endTime, start: line.time) ?? nextTime
+        let rawDuration = lineEndTime.map { max(0, $0 - line.time) }
         let duration = validLineDuration(rawDuration)
-        let previousDuration = index > 0
-            ? validLineDuration(max(0, line.time - lines[index - 1].time))
-            : nil
+        let previousDuration: TimeInterval?
+        if index > 0 {
+            let previousLine = lines[index - 1]
+            let previousEnd = validEndTime(previousLine.endTime, start: previousLine.time) ?? line.time
+            previousDuration = validLineDuration(max(0, previousEnd - previousLine.time))
+        } else {
+            previousDuration = nil
+        }
 
         let nextDuration: TimeInterval?
         if index + 1 < lines.count {
-            let nextLineStart = lines[index + 1].time
+            let nextLine = lines[index + 1]
+            let nextLineStart = nextLine.time
             let nextLineEnd: TimeInterval?
-            if index + 2 < lines.count {
+            if let explicitEnd = validEndTime(nextLine.endTime, start: nextLineStart) {
+                nextLineEnd = explicitEnd
+            } else if index + 2 < lines.count {
                 nextLineEnd = lines[index + 2].time
             } else {
                 nextLineEnd = trackDuration
@@ -231,10 +281,38 @@ enum DesktopLyricsParser {
         )
     }
 
-    private static func normalized(_ lines: [DesktopLyricLine]) -> [DesktopLyricLine] {
-        lines
+    private static func normalized(
+        _ lines: [DesktopLyricLine],
+        leadingSilence: TimeInterval? = nil,
+        insertsLeadingPlaceholder: Bool = false,
+        insertsInterludePlaceholders: Bool = false
+    ) -> [DesktopLyricLine] {
+        let sortedLines = lines
             .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { $0.time == $1.time ? $0.text < $1.text : $0.time < $1.time }
+        guard !sortedLines.isEmpty else { return [] }
+
+        var result: [DesktopLyricLine] = []
+        let first = sortedLines[0]
+        if insertsLeadingPlaceholder, shouldInsertLeadingPlaceholder(before: first, leadingSilence: leadingSilence) {
+            result.append(DesktopLyricLine(time: 0, text: silencePlaceholderText, endTime: first.time))
+        }
+
+        var previousVocalLine: DesktopLyricLine?
+        for line in sortedLines {
+            if insertsInterludePlaceholders,
+               let previous = previousVocalLine,
+               shouldInsertInterludePlaceholder(after: previous, before: line) {
+                let start = previous.endTime ?? previous.time
+                result.append(DesktopLyricLine(time: start, text: silencePlaceholderText, endTime: line.time))
+            }
+            result.append(line)
+            if !isSilencePlaceholderText(line.text) {
+                previousVocalLine = line
+            }
+        }
+
+        return result
     }
 
     private static func validLineDuration(_ value: TimeInterval?) -> TimeInterval? {
@@ -242,6 +320,159 @@ enum DesktopLyricsParser {
         return value
     }
 
+    private static func validEndTime(_ value: TimeInterval?, start: TimeInterval) -> TimeInterval? {
+        guard let value, value.isFinite, value > start + 0.12 else { return nil }
+        return value
+    }
+
+    private static func shouldInsertLeadingPlaceholder(before firstLine: DesktopLyricLine, leadingSilence: TimeInterval?) -> Bool {
+        guard !isSilencePlaceholderText(firstLine.text), firstLine.time.isFinite, firstLine.time > 0 else { return false }
+        let metadata = (leadingSilence?.isFinite == true) ? (leadingSilence ?? 0) : 0
+        return max(firstLine.time, metadata) > longSilencePlaceholderThreshold
+    }
+
+    private static func shouldInsertInterludePlaceholder(after previousLine: DesktopLyricLine, before nextLine: DesktopLyricLine) -> Bool {
+        guard !isSilencePlaceholderText(previousLine.text), !isSilencePlaceholderText(nextLine.text) else { return false }
+        guard let endTime = validEndTime(previousLine.endTime, start: previousLine.time) else { return false }
+        let gap = nextLine.time - endTime
+        return gap.isFinite && gap > longSilencePlaceholderThreshold
+    }
+
+    private static func isSilencePlaceholderText(_ text: String) -> Bool {
+        let compact = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+        guard !compact.isEmpty else { return false }
+        return compact.allSatisfy { $0 == "." || $0 == "…" || $0 == "⋯" }
+    }
+
+    private static func parseTTMLParagraphBody(
+        _ body: String,
+        lineStart: TimeInterval
+    ) -> (text: String, wordTimings: [DesktopLyricWordTiming], absoluteEndTime: TimeInterval?) {
+        guard let spanRegex = try? NSRegularExpression(
+            pattern: #"<span\b([^>]*)>(.*?)</span>"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        ), let beginRegex = try? NSRegularExpression(
+            pattern: #"\bbegin\s*=\s*[\"']([^\"']+)[\"']"#,
+            options: [.caseInsensitive]
+        ), let endRegex = try? NSRegularExpression(
+            pattern: #"\bend\s*=\s*[\"']([^\"']+)[\"']"#,
+            options: [.caseInsensitive]
+        ), let lineBreakRegex = try? NSRegularExpression(pattern: #"<br\s*/?>"#, options: [.caseInsensitive]),
+           let tagRegex = try? NSRegularExpression(pattern: #"<[^>]+>"#, options: []) else {
+            return (plainTTMLText(body), [], nil)
+        }
+
+        func plainText(_ fragment: String) -> String {
+            let range = NSRange(fragment.startIndex..<fragment.endIndex, in: fragment)
+            let withLineBreakSpaces = lineBreakRegex.stringByReplacingMatches(in: fragment, range: range, withTemplate: " ")
+            let tagRange = NSRange(withLineBreakSpaces.startIndex..<withLineBreakSpaces.endIndex, in: withLineBreakSpaces)
+            return decodeEntities(tagRegex.stringByReplacingMatches(in: withLineBreakSpaces, range: tagRange, withTemplate: ""))
+        }
+
+        let bodyRange = NSRange(body.startIndex..<body.endIndex, in: body)
+        let spans = spanRegex.matches(in: body, range: bodyRange)
+        guard !spans.isEmpty else { return (plainTTMLText(body), [], nil) }
+
+        var text = ""
+        var timings: [DesktopLyricWordTiming] = []
+        var maxAbsoluteEndTime: TimeInterval?
+        var cursor = bodyRange.location
+
+        func appendPlain(_ fragment: String) {
+            let normalized = normalizedInlineText(plainText(fragment))
+            guard !normalized.isEmpty else { return }
+            if text.last?.isWhitespace == false, normalized.first?.isWhitespace == false, shouldPreserveSeparator(before: text, next: normalized) {
+                text.append(" ")
+            }
+            text.append(normalized)
+        }
+
+        for span in spans {
+            if span.range.location > cursor {
+                appendPlain(substring(body, nsRange: NSRange(location: cursor, length: span.range.location - cursor)))
+            }
+
+            let attributes = substring(body, nsRange: span.range(at: 1))
+            let attrRange = NSRange(attributes.startIndex..<attributes.endIndex, in: attributes)
+            let spanText = normalizedInlineText(plainText(substring(body, nsRange: span.range(at: 2))))
+            if !spanText.isEmpty {
+                if text.last?.isWhitespace == false, spanText.first?.isWhitespace == false, shouldPreserveSeparator(before: text, next: spanText) {
+                    text.append(" ")
+                }
+                let location = text.utf16.count
+                text.append(spanText)
+                if let begin = beginRegex.firstMatch(in: attributes, range: attrRange).flatMap({ parseTime(substring(attributes, nsRange: $0.range(at: 1))) }),
+                   let end = endRegex.firstMatch(in: attributes, range: attrRange).flatMap({ parseTime(substring(attributes, nsRange: $0.range(at: 1))) }),
+                   end > begin + 0.015 {
+                    timings.append(DesktopLyricWordTiming(start: max(0, begin - lineStart), end: max(0.015, end - lineStart), utf16Location: location, utf16Length: spanText.utf16.count))
+                    maxAbsoluteEndTime = max(maxAbsoluteEndTime ?? end, end)
+                }
+            }
+            cursor = span.range.location + span.range.length
+        }
+
+        let bodyEnd = bodyRange.location + bodyRange.length
+        if cursor < bodyEnd {
+            appendPlain(substring(body, nsRange: NSRange(location: cursor, length: bodyEnd - cursor)))
+        }
+
+        let trimmed = trimWordTimedText(text, timings: timings)
+        return (trimmed.text, trimmed.timings, maxAbsoluteEndTime)
+    }
+
+    private static func plainTTMLText(_ body: String) -> String {
+        guard let lineBreakRegex = try? NSRegularExpression(pattern: #"<br\s*/?>"#, options: [.caseInsensitive]),
+              let tagRegex = try? NSRegularExpression(pattern: #"<[^>]+>"#, options: []) else {
+            return decodeEntities(body)
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let bodyRange = NSRange(body.startIndex..<body.endIndex, in: body)
+        let withLineBreakSpaces = lineBreakRegex.stringByReplacingMatches(in: body, range: bodyRange, withTemplate: " ")
+        let tagRange = NSRange(withLineBreakSpaces.startIndex..<withLineBreakSpaces.endIndex, in: withLineBreakSpaces)
+        return decodeEntities(tagRegex.stringByReplacingMatches(in: withLineBreakSpaces, range: tagRange, withTemplate: ""))
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedInlineText(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func shouldPreserveSeparator(before text: String, next: String) -> Bool {
+        guard let previous = text.last, let first = next.first else { return false }
+        if previous.isWhitespace || first.isWhitespace { return false }
+        return previous.isASCII && first.isASCII
+    }
+
+    private static func trimWordTimedText(
+        _ rawText: String,
+        timings: [DesktopLyricWordTiming]
+    ) -> (text: String, timings: [DesktopLyricWordTiming]) {
+        let leadingCount = rawText.prefix { $0.isWhitespace }.reduce(0) { $0 + String($1).utf16.count }
+        let trimmedText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return ("", []) }
+        let length = trimmedText.utf16.count
+        let adjusted = timings.compactMap { timing -> DesktopLyricWordTiming? in
+            let location = timing.utf16Location - leadingCount
+            guard location >= 0, location + timing.utf16Length <= length else { return nil }
+            return DesktopLyricWordTiming(start: timing.start, end: timing.end, utf16Location: location, utf16Length: timing.utf16Length)
+        }
+        return (trimmedText, adjusted)
+    }
+
+    private static func parseTTMLLeadingSilence(in text: String) -> TimeInterval? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"\bleadingSilence\s*=\s*[\"']([^\"']+)[\"']"#,
+            options: [.caseInsensitive]
+        ) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range) else { return nil }
+        return parseTime(substring(text, nsRange: match.range(at: 1)))
+    }
 
     private static func parseTime(_ value: String) -> TimeInterval? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
