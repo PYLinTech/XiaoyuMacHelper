@@ -197,7 +197,7 @@ final class IconButtonView: NSButton {
         switch backgroundStyle {
         case .glass:
             isBordered = true
-            bezelStyle = .glass
+            bezelStyle = .liquidGlass
         case .plain:
             isBordered = false
         }

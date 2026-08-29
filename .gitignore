@@ -12,3 +12,6 @@ xcuserdata/
 dist/
 release/
 .release-staging/
+
+# WorkBuddy local workspace data
+.workbuddy/

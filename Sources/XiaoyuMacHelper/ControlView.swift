@@ -42,16 +42,16 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private var isAccessibilityEnabledForDisplay = false
     private var isSearchTemplateCustom = false
 
-    private let glassContainer = NSGlassEffectContainerView()
+    private let glassContainer = LiquidGlassContainerView()
     private let glassContentView = NSView()
     private let titleLabel = NSTextField(labelWithString: "Xiaoyu MacHelper")
     private let versionLabel = NSTextField(labelWithString: "")
     private let toolOptionsTitle = NSTextField(labelWithString: "工具选项")
     private let moduleTitle = NSTextField(labelWithString: "功能模块")
     private let settingsTitle = NSTextField(labelWithString: "")
-    private let toolOptionsCard = NSGlassEffectView()
-    private let moduleCard = NSGlassEffectView()
-    private let settingsCard = NSGlassEffectView()
+    private let toolOptionsCard = LiquidGlassEffectView()
+    private let moduleCard = LiquidGlassEffectView()
+    private let settingsCard = LiquidGlassEffectView()
     private let settingsScrollView = NSScrollView(frame: .zero)
     private let settingsContentView = NSView(frame: .zero)
     private var settingsContentHeight: CGFloat = 0
@@ -310,7 +310,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         backButton.onClick = { [weak self] in self?.backButtonClicked() }
 
         [loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton].forEach {
-            $0.bezelStyle = .glass
+            $0.bezelStyle = .liquidGlass
             $0.font = NSFont.systemFont(ofSize: 12, weight: .medium)
             addSubview($0)
         }
@@ -341,7 +341,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         screenshotRow.onSettings = { [weak self] _ in self?.showScreenshotSettingsPage() }
 
         searchEnginePopup.addItems(withTitles: SearchEnginePreset.all.map(\.title) + [SearchEnginePreset.customTitle])
-        searchEnginePopup.bezelStyle = .glass
+        searchEnginePopup.bezelStyle = .liquidGlass
         searchEnginePopup.target = self
         searchEnginePopup.action = #selector(searchEngineSelected)
         settingsContentView.addSubview(searchEnginePopup)
@@ -366,7 +366,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         screenshotSaveLabel.textColor = .labelColor
         settingsContentView.addSubview(screenshotSaveLabel)
 
-        screenshotSaveButton.bezelStyle = .glass
+        screenshotSaveButton.bezelStyle = .liquidGlass
         screenshotSaveButton.alignment = .left
         screenshotSaveButton.font = NSFont.systemFont(ofSize: 13, weight: .regular)
         screenshotSaveButton.target = self
@@ -401,14 +401,14 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         desktopLyricsLanguageLabel.textColor = .labelColor
         settingsContentView.addSubview(desktopLyricsLanguageLabel)
         desktopLyricsLanguagePopup.addItems(withTitles: DesktopLyricsPreferredLanguage.allCases.map(\.title))
-        desktopLyricsLanguagePopup.bezelStyle = .glass
+        desktopLyricsLanguagePopup.bezelStyle = .liquidGlass
         desktopLyricsLanguagePopup.target = self
         desktopLyricsLanguagePopup.action = #selector(desktopLyricsLanguageSelected)
         settingsContentView.addSubview(desktopLyricsLanguagePopup)
 
         [desktopLyricsAlignmentPopup, dynamicIslandLyricsAlignmentPopup, menuBarLyricsAlignmentPopup].forEach { popup in
             popup.addItems(withTitles: LyricsTextAlignment.allCases.map(\.title))
-            popup.bezelStyle = .glass
+            popup.bezelStyle = .liquidGlass
             settingsContentView.addSubview(popup)
         }
         desktopLyricsAlignmentPopup.target = self
@@ -423,20 +423,20 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
             settingsContentView.addSubview(label)
         }
         desktopLyricsStylePopup.addItems(withTitles: DesktopLyricsStylePreset.allCases.map(\.title))
-        desktopLyricsStylePopup.bezelStyle = .glass
+        desktopLyricsStylePopup.bezelStyle = .liquidGlass
         desktopLyricsStylePopup.target = self
         desktopLyricsStylePopup.action = #selector(desktopLyricsStyleSelected)
         settingsContentView.addSubview(desktopLyricsStylePopup)
         let availableFontFamilies = NSFontManager.shared.availableFontFamilies.sorted()
         desktopLyricsFontPopup.addItem(withTitle: "系统默认")
         desktopLyricsFontPopup.addItems(withTitles: availableFontFamilies)
-        desktopLyricsFontPopup.bezelStyle = .glass
+        desktopLyricsFontPopup.bezelStyle = .liquidGlass
         desktopLyricsFontPopup.target = self
         desktopLyricsFontPopup.action = #selector(desktopLyricsFontSelected)
         settingsContentView.addSubview(desktopLyricsFontPopup)
         dynamicIslandLyricsFontPopup.addItem(withTitle: "系统默认")
         dynamicIslandLyricsFontPopup.addItems(withTitles: availableFontFamilies)
-        dynamicIslandLyricsFontPopup.bezelStyle = .glass
+        dynamicIslandLyricsFontPopup.bezelStyle = .liquidGlass
         dynamicIslandLyricsFontPopup.target = self
         dynamicIslandLyricsFontPopup.action = #selector(dynamicIslandLyricsFontSelected)
         settingsContentView.addSubview(dynamicIslandLyricsFontPopup)
@@ -485,7 +485,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         settingsContentView.addSubview(desktopLyricsTextColorWell)
         settingsContentView.addSubview(desktopLyricsStrokeColorWell)
         settingsContentView.addSubview(desktopLyricsStrokeWidthSlider)
-        musicLyricsWhitelistButton.bezelStyle = .glass
+        musicLyricsWhitelistButton.bezelStyle = .liquidGlass
         musicLyricsWhitelistButton.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         musicLyricsWhitelistButton.target = self
         musicLyricsWhitelistButton.action = #selector(showMusicLyricsWhitelistSettingsPage)
@@ -514,7 +514,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         settingsContentView.addSubview(whitelistRemoveButton)
 
         [appleMusicLoginButton, appleMusicClearTokenButton].forEach { button in
-            button.bezelStyle = .glass
+            button.bezelStyle = .liquidGlass
             button.font = NSFont.systemFont(ofSize: 13, weight: .medium)
             settingsContentView.addSubview(button)
         }

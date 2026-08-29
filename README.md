@@ -11,12 +11,12 @@ Xiaoyu MacHelper 是一个后台运行的 macOS 辅助工具。双击启动会�
 - 选区工具栏支持 `复制`、`粘贴`、`搜索`、`截图`，可启用、排序和设置搜索引擎。
 - 新增桌面歌词模块：开启后显示悬浮桌面歌词，按 QQ 音乐、网易云音乐、Apple Music 的顺序搜索歌词。
 - Apple Music 歌词源支持内置网页登录，登录后自动保存本机 media-user-token。
-- 使用 macOS 26 的 `NSGlassEffectView` 液态玻璃效果。
+- 使用液态玻璃毛玻璃效果（macOS 26 原生 `NSGlassEffectView`，macOS 15 自动降级为 `NSVisualEffectView` 兼容实现）。
 
 ## 系统要求
 
-- macOS 26 或更高版本。
-- Xcode / SwiftPM，支持 Swift 6.2。
+- macOS 15 或更高版本（兼容 macOS 26）。
+- 构建环境同时支持两种 SDK：macOS 15 SDK（Xcode 16.x / Swift 6.1）或 macOS 26 SDK（Xcode 26 / Swift 6.2+）均可编译；产物运行时自动适配——macOS 26 上使用系统原生液态玻璃，macOS 15 上自动降级为毛玻璃。
 - 选区工具栏需要“辅助功能”权限。
 - 桌面歌词需要联网访问歌词源；Apple Music 歌词源建议先在桌面歌词设置中完成网页登录。
 

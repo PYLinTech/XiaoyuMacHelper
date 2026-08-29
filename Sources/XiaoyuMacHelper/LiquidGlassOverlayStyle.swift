@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 enum LiquidGlassOverlayStyle {
-    static func configureGlass(_ view: NSGlassEffectView, cornerRadius: CGFloat) {
+    static func configureGlass(_ view: LiquidGlassEffectView, cornerRadius: CGFloat) {
         view.style = .clear
         view.tintColor = nil
         view.cornerRadius = cornerRadius

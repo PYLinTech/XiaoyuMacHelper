@@ -49,7 +49,7 @@ final class AppleMusicTokenLoginWindow: NSWindow, WKNavigationDelegate {
         instructionLabel.maximumNumberOfLines = 2
         containerView.addSubview(instructionLabel)
 
-        checkButton.bezelStyle = .glass
+        checkButton.bezelStyle = .liquidGlass
         checkButton.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         checkButton.target = self
         checkButton.action = #selector(checkTokenNow)

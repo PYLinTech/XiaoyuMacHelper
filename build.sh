@@ -14,7 +14,7 @@ ICON_FILE="$ROOT_DIR/Resources/AppIcon.icns"
 
 cd "$ROOT_DIR"
 pkill -x "$APP_NAME" 2>/dev/null || true
-swift build -c release
+swift build -c release --disable-sandbox
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
@@ -41,7 +41,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleVersion</key>
   <string>$APP_BUILD</string>
   <key>LSMinimumSystemVersion</key>
-  <string>26.0</string>
+  <string>15.0</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSCameraUsageDescription</key>

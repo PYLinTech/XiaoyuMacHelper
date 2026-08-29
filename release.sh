@@ -70,10 +70,12 @@ fi
 ditto "$APP_DIR" "$STAGING_DIR/$APP_NAME.app"
 ln -s /Applications "$STAGING_DIR/Applications"
 
-diskutil image create from \
-  --volumeName "$APP_NAME" \
-  --format UDZO \
-  "$STAGING_DIR" \
+# 使用 hdiutil 创建带卷名的 DMG（diskutil image create from 不支持 --volumeName）。
+hdiutil create \
+  -volname "$APP_NAME" \
+  -srcfolder "$STAGING_DIR" \
+  -ov \
+  -format UDZO \
   "$DMG_PATH"
 
 rm -rf "$STAGING_DIR"

@@ -31,7 +31,7 @@ final class SelectionToolbarWindow: FloatingOverlayPanel {
 
         configureFloatingOverlay()
 
-        let background = NSGlassEffectView(frame: contentView?.bounds ?? .zero)
+        let background = LiquidGlassEffectView(frame: contentView?.bounds ?? .zero)
         background.autoresizingMask = [.width, .height]
         LiquidGlassOverlayStyle.configureGlass(background, cornerRadius: Metrics.cornerRadius)
         buttonContainer.frame = background.bounds

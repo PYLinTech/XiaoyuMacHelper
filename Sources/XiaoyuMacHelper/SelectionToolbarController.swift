@@ -221,14 +221,28 @@ final class SelectionToolbarController {
     }
 
     private func captureImage(in rect: CGRect, completion: @MainActor @Sendable @escaping (CGImage) -> Void) {
-        SCScreenshotManager.captureImage(in: rect) { [weak self] image, error in
-            Task { @MainActor [weak self] in
+        if #available(macOS 15.2, *) {
+            SCScreenshotManager.captureImage(in: rect) { [weak self] image, error in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard let image else {
+                        self.showToast("截图失败")
+                        return
+                    }
+
+                    completion(image)
+                }
+            }
+        } else {
+            // macOS 15.0 / 15.1 兼容：使用 SCStream 单帧截图作为降级路径
+            let frameCapture = ScreenFrameCapture()
+            Task { [weak self] in
+                let image = await frameCapture.captureImage(in: rect)
                 guard let self else { return }
                 guard let image else {
                     self.showToast("截图失败")
                     return
                 }
-
                 completion(image)
             }
         }
