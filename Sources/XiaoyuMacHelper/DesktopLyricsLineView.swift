@@ -71,6 +71,7 @@ final class DesktopLyricsLineView: NSView {
         didSet {
             guard oldValue != alignment else { return }
             attributedCache = nil
+            invalidateScrollPlan()
             needsDisplay = true
         }
     }
@@ -124,8 +125,6 @@ final class DesktopLyricsLineView: NSView {
         var textWidthBucket: Int
         var fontBucket: Int
         var durationBucket: Int
-        var previousBucket: Int
-        var nextBucket: Int
         var wordTimingBucket: Int
     }
 
@@ -136,17 +135,12 @@ final class DesktopLyricsLineView: NSView {
 
     private struct TimedScrollPlan {
         var signature: ScrollPlanSignature
-        var startDelay: CFTimeInterval
         var travelDuration: CFTimeInterval
-        var tailHold: CFTimeInterval
         var targetOffset: CGFloat
         var rampFraction: CFTimeInterval
-        var leadInOffset: CGFloat
         var repeatCount: Int
         var repeatStride: CGFloat
         var wordAnchors: [WordScrollAnchor]
-
-        var travelEnd: CFTimeInterval { startDelay + travelDuration }
     }
 
     private struct RenderSample {
@@ -805,9 +799,9 @@ final class DesktopLyricsLineView: NSView {
 
         let visibleWidth = max(1, protectedTextRect().width)
         let textWidth = visibleWidth + maxOffset
-        let current = clamp(duration, 0.14, 42.0)
+        // `duration` is already normalized to [0.14, 42.0] by syncLineTiming; no extra clamp.
         let repeatCount = timedRepeatCount(
-            duration: current,
+            duration: duration,
             viewportWidth: visibleWidth,
             textWidth: textWidth,
             maxOffset: maxOffset
@@ -815,9 +809,9 @@ final class DesktopLyricsLineView: NSView {
         let repeatGap = repeatGapWidth(viewportWidth: visibleWidth)
         let repeatStride = repeatCount > 1 ? ceil(textWidth + repeatGap) : 0
         let effectiveTargetOffset = maxOffset + CGFloat(max(0, repeatCount - 1)) * repeatStride
-        let wordAnchors = wordScrollAnchors(duration: current, viewportWidth: visibleWidth, maxOffset: effectiveTargetOffset)
+        let wordAnchors = wordScrollAnchors(duration: duration, viewportWidth: visibleWidth, maxOffset: effectiveTargetOffset)
         let rampFraction = formulaRampFraction(
-            lineDuration: current,
+            lineDuration: duration,
             viewportWidth: visibleWidth,
             textWidth: textWidth,
             maxOffset: effectiveTargetOffset
@@ -833,12 +827,9 @@ final class DesktopLyricsLineView: NSView {
         // lyrics scrolled quickly to the end and then waited for the next line.
         let plan = TimedScrollPlan(
             signature: signature,
-            startDelay: 0,
-            travelDuration: current,
-            tailHold: 0,
+            travelDuration: duration,
             targetOffset: effectiveTargetOffset,
             rampFraction: rampFraction,
-            leadInOffset: 0,
             repeatCount: repeatCount,
             repeatStride: repeatStride,
             wordAnchors: wordAnchors
@@ -854,8 +845,6 @@ final class DesktopLyricsLineView: NSView {
             textWidthBucket: Int((maxOffset / 2).rounded()),
             fontBucket: Int((font.pointSize * 10).rounded()),
             durationBucket: bucket(timing.duration ?? duration),
-            previousBucket: 0,
-            nextBucket: 0,
             wordTimingBucket: wordTimingBucket()
         )
     }
@@ -934,7 +923,7 @@ final class DesktopLyricsLineView: NSView {
             }
         case .moving:
             let progress = clamp(elapsed / travelDuration, 0, 1)
-            untimedState.offset = maxOffset * CGFloat(readableMotionCurve(progress, rampFraction: 0.20))
+            untimedState.offset = maxOffset * CGFloat(lineTimelineProgress(progress, rampFraction: 0.155))
             untimedState.alpha = 1
             if progress >= 1 {
                 untimedState.offset = maxOffset
@@ -1085,16 +1074,18 @@ final class DesktopLyricsLineView: NSView {
         )
     }
 
+    /// Maps line progress (0...1) to scroll progress with smooth, asymmetric acceleration and
+    /// deceleration ramps. The result starts at 0 and lands exactly on 1, so the text reaches its
+    /// final offset precisely when the line duration elapses.
+    ///
+    /// Invariants: velocity is 0 at both ends (C2-smooth smootherstep ramps) and exactly
+    /// 1/totalArea in the middle span, so the scroll reaches maxOffset exactly at t = 1.
+    /// The lower clamps are pure zero-division guards — formulaRampFraction already keeps
+    /// the fraction in [0.018, 0.155], so every value it produces changes the curve shape.
     private func lineTimelineProgress(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
-        let startRamp = clamp(rampFraction * 1.42 + 0.010, 0.040, 0.190)
-        let endRamp = clamp(rampFraction * 0.92 + 0.006, 0.030, 0.145)
-        return asymmetricTimelineProgress(value, startRamp: startRamp, endRamp: endRamp)
-    }
-
-    private func asymmetricTimelineProgress(_ value: CFTimeInterval, startRamp: CFTimeInterval, endRamp: CFTimeInterval) -> CFTimeInterval {
         let t = clamp(value, 0, 1)
-        let start = clamp(startRamp, 0.001, 0.42)
-        let end = clamp(endRamp, 0.001, min(0.42, 0.92 - start))
+        let start = clamp(rampFraction * 1.42 + 0.010, 0.001, 0.190)
+        let end = clamp(rampFraction * 0.92 + 0.006, 0.001, 0.145)
         let totalArea = max(0.001, 1 - (start + end) / 2)
         if t < start {
             let u = t / start
@@ -1107,10 +1098,6 @@ final class DesktopLyricsLineView: NSView {
             return (beforeTail + tailArea) / totalArea
         }
         return (0.5 * start + (t - start)) / totalArea
-    }
-
-    private func readableMotionCurve(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
-        lineTimelineProgress(value, rampFraction: rampFraction)
     }
 
     private func normalizedWordTimings(_ timings: [DesktopLyricWordTiming], duration: CFTimeInterval?) -> [DesktopLyricWordTiming] {
@@ -1152,10 +1139,24 @@ final class DesktopLyricsLineView: NSView {
         return hash
     }
 
+    /// Where in the visible viewport the currently sung word should rest while it scrolls.
+    /// Follows the lyric alignment: left-aligned text parks the active word on the left edge,
+    /// right-aligned parks it on the right edge, centered keeps it at the visual center.
+    private func preferredAnchorCenter(viewportWidth: CGFloat) -> CGFloat {
+        switch alignment {
+        case .left, .natural, .justified:
+            return viewportWidth * 0.12
+        case .right:
+            return viewportWidth * 0.88
+        default:
+            return viewportWidth * 0.48
+        }
+    }
+
     private func wordScrollAnchors(duration: CFTimeInterval, viewportWidth: CGFloat, maxOffset: CGFloat) -> [WordScrollAnchor] {
         guard !wordTimings.isEmpty, maxOffset > 8, viewportWidth > 8 else { return [] }
         let nsText = stringValue as NSString
-        let preferredCenter = viewportWidth * 0.48
+        let preferredCenter = preferredAnchorCenter(viewportWidth: viewportWidth)
         var anchors: [WordScrollAnchor] = [WordScrollAnchor(time: 0, offset: 0)]
         var lastOffset: CGFloat = 0
         for timing in wordTimings {

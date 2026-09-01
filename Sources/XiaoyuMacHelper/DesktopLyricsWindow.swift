@@ -11,12 +11,20 @@ final class DesktopLyricsWindow: FloatingOverlayPanel {
         static let bottomInset: CGFloat = 128
     }
 
+    // 与灵动大陆的显示/隐藏动画时长对齐（animatePresentationIn 默认 0.19s，hide 收缩 0.105s）。
+    // 两个表面必须同速切换，否则一个在动画、一个在硬切，切换瞬间歌词会明显闪烁。
+    private static let showFadeDuration: TimeInterval = 0.19
+    private static let hideFadeDuration: TimeInterval = 0.105
+
     private let lyricsView = DesktopLyricsView()
     private var settings: AppSettings
     private var currentWidth: CGFloat
     private var dragStartLocation: NSPoint?
     private var dragStartOrigin: NSPoint?
     private var isDragging = false
+    /// 显示/隐藏动画代际计数。快速 show/hide 交替时，旧的动画完成回调（比如 fade-out 里的
+    /// orderOut）必须被新一次切换作废，否则会把刚淡入的窗口直接收走，形成闪没。
+    private var visibilityGeneration = 0
 
     var onPositionChanged: ((NSPoint) -> Void)?
 
@@ -97,7 +105,49 @@ final class DesktopLyricsWindow: FloatingOverlayPanel {
             updateFrameForCurrentContent(keepsStoredPosition: true)
         }
         if !isVisible {
+            // 先以零透明度入屏再淡入，避免 orderFront 的瞬间整窗闪现（内容未淡入就可见）。
+            alphaValue = 0
             orderFrontRegardless()
+        }
+        if alphaValue < 0.98 {
+            // 覆盖两种情况：刚入屏（alpha 0）需要淡入；或上一次淡出尚未完成就被 show
+            // 打断（从当前透明度直接转淡入）。窗口不会停留在半透明状态。
+            fadeIn()
+        }
+    }
+
+    func hide() {
+        // 只对真正在屏的窗口淡出。从未显示过的窗口（alphaValue 默认 1）直接跳过，
+        // 避免轮询路径频繁调用 hideAllSurfaces 时反复播放无意义动画。
+        guard isVisible else { return }
+        fadeOut()
+    }
+
+    private func fadeIn() {
+        visibilityGeneration += 1
+        let generation = visibilityGeneration
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.showFadeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.animator().alphaValue = 1
+        } completionHandler: { [weak self] in
+            guard let self, generation == self.visibilityGeneration else { return }
+            self.alphaValue = 1
+        }
+    }
+
+    private func fadeOut() {
+        visibilityGeneration += 1
+        let generation = visibilityGeneration
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.hideFadeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            self.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            guard let self, generation == self.visibilityGeneration else { return }
+            // 淡出结束才收窗口：动画中途 orderOut 等于瞬间消失，正是闪烁的来源。
+            self.alphaValue = 0
+            self.orderOut(nil)
         }
     }
 

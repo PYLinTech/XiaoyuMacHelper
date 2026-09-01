@@ -93,6 +93,9 @@ final class ScreenshotToolbarButton: NSButton {
     private var trackingAreaRef: NSTrackingArea?
     private var isHovering = false
     var onClick: (() -> Void)?
+    var titleColor: NSColor = LiquidGlassOverlayStyle.primaryTextColor() {
+        didSet { setTitle(title) }
+    }
 
     init(title: String) {
         super.init(frame: .zero)
@@ -142,7 +145,8 @@ final class ScreenshotToolbarButton: NSButton {
     func setTitle(_ title: String) {
         let attributed = LiquidGlassOverlayStyle.attributedText(
             title,
-            font: NSFont.systemFont(ofSize: 13, weight: .medium)
+            font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            color: titleColor
         )
         attributedTitle = attributed
         attributedAlternateTitle = attributed
@@ -153,7 +157,10 @@ final class ScreenshotToolbarButton: NSButton {
     }
 
     private func updateHoverBackground() {
-        layer?.backgroundColor = isHovering ? LiquidGlassOverlayStyle.hoverBackgroundColor() : nil
+        // 与 AnnotationToolbarButton 统一：白色 0.24 hover（毛玻璃上的"钮感"反馈）。
+        layer?.backgroundColor = isHovering
+            ? NSColor.white.withAlphaComponent(0.24).cgColor
+            : nil
     }
 }
 

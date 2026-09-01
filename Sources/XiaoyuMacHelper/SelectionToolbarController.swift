@@ -26,6 +26,8 @@ final class SelectionToolbarController {
     private let toastWindow = ToastWindow()
     private lazy var screenshotSelectionWindow = ScreenshotSelectionWindow()
     private var eventMonitor: Any?
+    private var keyDownMonitor: Any?
+    private var localClickMonitor: Any?
     private var currentSettings: AppSettings
     private var mouseDownLocation: NSPoint?
     private var selectionRect: CGRect?
@@ -58,18 +60,58 @@ final class SelectionToolbarController {
     func stop() {
         reset(shouldHideToolbar: true, clearTarget: true)
         removeEventMonitor(&eventMonitor)
+        removeEventMonitor(&keyDownMonitor)
+        removeEventMonitor(&localClickMonitor)
     }
 
     private func syncEventMonitor() {
-        if isEnabled, eventMonitor == nil {
+        guard isEnabled else {
+            removeEventMonitor(&eventMonitor)
+            removeEventMonitor(&keyDownMonitor)
+            removeEventMonitor(&localClickMonitor)
+            return
+        }
+
+        // 全局鼠标：只监听其他 app 的点击/拖拽，驱动选区工具栏的显示与跨应用点击隐藏。
+        if eventMonitor == nil {
             eventMonitor = NSEvent.addGlobalMonitorForEvents(
                 matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown]
             ) { [weak self] event in
                 DispatchQueue.main.async { self?.handle(event) }
             }
-        } else if !isEnabled {
-            removeEventMonitor(&eventMonitor)
         }
+
+        // 全局键盘：用户在任意 app 开始打字/按键时收起工具栏。全局 monitor 收不到
+        // 本 app 的事件，所以工具栏自身的注入快捷键（Cmd+C 等）只会幂等地重复隐藏
+        // 已经收起的工具栏，不会造成意外。
+        if keyDownMonitor == nil {
+            keyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] _ in
+                DispatchQueue.main.async { self?.hideForExternalInput() }
+            }
+        }
+
+        // 局部鼠标：本 app 窗口（如控制面板）的点击全局 monitor 看不到，补一个局部
+        // monitor。通过 windowNumber 排除工具栏自身的按钮点击——点按钮是操作，不是
+        // "点击其他地方"。
+        if localClickMonitor == nil {
+            localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+                DispatchQueue.main.async { self?.handleLocalClick(event) }
+                return event
+            }
+        }
+    }
+
+    /// 点击了本 app 的其他窗口（控制面板等）→ 收起工具栏。工具栏自身的按钮点击
+    /// （windowNumber 相同）不处理，保持按钮可用。
+    private func handleLocalClick(_ event: NSEvent) {
+        guard event.windowNumber != toolbarWindow.windowNumber else { return }
+        hideForExternalInput()
+    }
+
+    /// 任意键盘输入或点击本 app 其他窗口 → 收起工具栏并清空选区状态。
+    private func hideForExternalInput() {
+        guard isEnabled, toolbarWindow.isVisible else { return }
+        reset(shouldHideToolbar: true, clearTarget: true)
     }
 
     private func handle(_ event: NSEvent) {

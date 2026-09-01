@@ -5,6 +5,7 @@ import Carbon
 final class ScreenshotSelectionWindow: NSPanel {
     private let selectionView = ScreenshotSelectionView()
     private let actionToolbarWindow = ScreenshotActionToolbarWindow()
+    private let annotationWindow = ScreenshotAnnotationWindow()
 
     init() {
         super.init(
@@ -50,6 +51,33 @@ final class ScreenshotSelectionWindow: NSPanel {
         }
         actionToolbarWindow.onConfirm = { [weak self] in
             self?.selectionView.confirm()
+        }
+        actionToolbarWindow.onCancel = { [weak self] in
+            self?.selectionView.cancel()
+        }
+        actionToolbarWindow.onAnnotate = { [weak self] in
+            guard let self else { return }
+            self.actionToolbarWindow.orderOut(nil)
+            let imageSelection = Self.imageRect(
+                fromAppKitSelection: self.selectionView.currentSelection,
+                screenSize: screenFrame.size,
+                imageSize: NSSize(width: image.width, height: image.height)
+            )
+            self.annotationWindow.show(
+                image: image,
+                selection: imageSelection,
+                screenFrame: screenFrame,
+                onSave: { [weak self] annotatedImage in
+                    guard let self else { return }
+                    self.dismissSelectionOverlay()
+                    onConfirm(annotatedImage)
+                },
+                onCancel: { [weak self] in
+                    guard let self else { return }
+                    self.orderFrontRegardless()
+                    self.positionActionToolbar(self.selectionView.actionBarFrame, screenFrame: screenFrame)
+                }
+            )
         }
         selectionView.configure(
             image: image,
@@ -118,6 +146,23 @@ final class ScreenshotSelectionWindow: NSPanel {
 
         return image.cropping(to: cropRect)
     }
+
+    /// 把选区从视图坐标（左下原点）转换为图像坐标（左上原点、像素），供批注窗口使用。
+    private static func imageRect(
+        fromAppKitSelection selection: NSRect,
+        screenSize: NSSize,
+        imageSize: NSSize
+    ) -> NSRect {
+        guard screenSize.width > 0, screenSize.height > 0 else { return .zero }
+        let scaleX = imageSize.width / screenSize.width
+        let scaleY = imageSize.height / screenSize.height
+        return NSRect(
+            x: selection.minX * scaleX,
+            y: (screenSize.height - selection.maxY) * scaleY,
+            width: selection.width * scaleX,
+            height: selection.height * scaleY
+        )
+    }
 }
 
 @MainActor
@@ -142,16 +187,22 @@ final class ScreenshotSelectionView: NSView {
         static let confirmGap: CGFloat = 12
 
         static var actionBarWidth: CGFloat {
-            actionBarPadding * 2 + actionButtonWidth * 2 + actionBarGap
+            ScreenshotActionToolbarWindow.preferredWidth
         }
     }
 
     private var previewImage: NSImage?
     private var selection = NSRect.zero
     private var draggedCorner: Corner?
+    private var isMovingSelection = false
+    private var dragStartPoint: NSPoint?
+    private var dragStartOrigin: NSPoint?
     private var onConfirm: ((NSRect) -> Void)?
     private var onCancel: (() -> Void)?
     private var onActionBarFrameChanged: ((NSRect) -> Void)?
+
+    /// 当前选区（视图坐标，供批注窗口换算为图像坐标）。
+    var currentSelection: NSRect { selection }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -163,10 +214,8 @@ final class ScreenshotSelectionView: NSView {
         onActionBarFrameChanged: @escaping (NSRect) -> Void
     ) {
         previewImage = NSImage(cgImage: image, size: bounds.size)
+        // 保留用户实际拖出的选区原样（不做"位移太小回退默认位置"的放大处理）。
         selection = Self.normalized(initialSelection).intersection(bounds)
-        if selection.width < Metrics.minSelectionSize || selection.height < Metrics.minSelectionSize {
-            selection = bounds.insetBy(dx: bounds.width * 0.25, dy: bounds.height * 0.25)
-        }
         self.onConfirm = onConfirm
         self.onCancel = onCancel
         self.onActionBarFrameChanged = onActionBarFrameChanged
@@ -193,8 +242,20 @@ final class ScreenshotSelectionView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        draggedCorner = corner(at: point)
+        let point = clamped(convert(event.locationInWindow, from: nil))
+        if let corner = corner(at: point) {
+            draggedCorner = corner
+            isMovingSelection = false
+        } else if selection.contains(point) {
+            // 点在选区内部：进入"整体拖动"模式，像拖动一个块一样平移选区。
+            draggedCorner = nil
+            isMovingSelection = true
+            dragStartPoint = point
+            dragStartOrigin = selection.origin
+        } else {
+            draggedCorner = nil
+            isMovingSelection = false
+        }
 
         // 点击选区外时不要让独立的确认工具栏被截图窗口压到后面。
         // 这里重新通知外层定位/置顶一次，保证工具栏仍停留在当前选区附近。
@@ -202,16 +263,28 @@ final class ScreenshotSelectionView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let draggedCorner else { return }
         let previousDirtyRect = redrawRectForCurrentSelection()
         let point = clamped(convert(event.locationInWindow, from: nil))
-        updateSelection(corner: draggedCorner, point: point)
+
+        if let corner = draggedCorner {
+            updateSelection(corner: corner, point: point)
+        } else if isMovingSelection, let start = dragStartPoint, let origin = dragStartOrigin {
+            moveSelection(
+                by: NSPoint(x: point.x - start.x, y: point.y - start.y),
+                fromOrigin: origin
+            )
+        }
+
         onActionBarFrameChanged?(actionBarFrame)
+        window?.invalidateCursorRects(for: self)
         setNeedsDisplay(previousDirtyRect.union(redrawRectForCurrentSelection()))
     }
 
     override func mouseUp(with event: NSEvent) {
         draggedCorner = nil
+        isMovingSelection = false
+        dragStartPoint = nil
+        dragStartOrigin = nil
     }
 
     override func keyDown(with event: NSEvent) {
@@ -219,8 +292,59 @@ final class ScreenshotSelectionView: NSView {
             cancel()
         } else if event.keyCode == kVK_Return {
             confirm()
+        } else if nudgeSelection(with: event) {
+            // 方向键微调完成：刷新工具栏位置与光标区。
+            onActionBarFrameChanged?(actionBarFrame)
+            window?.invalidateCursorRects(for: self)
+            setNeedsDisplay(redrawRectForCurrentSelection())
         } else {
             super.keyDown(with: event)
+        }
+    }
+
+    /// 方向键微调选区（±1pt / Shift+方向 ±10pt），尺寸不变，clamp 到 bounds 内。
+    /// 返回 true 表示消费了该事件，false 表示非方向键交由父类处理。
+    private func nudgeSelection(with event: NSEvent) -> Bool {
+        let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
+        var dx: CGFloat = 0, dy: CGFloat = 0
+        switch event.keyCode {
+        case UInt16(kVK_LeftArrow):  dx = -step
+        case UInt16(kVK_RightArrow): dx = step
+        case UInt16(kVK_DownArrow):  dy = -step   // AppKit 视图 y 向上，DownArrow = 减小 y
+        case UInt16(kVK_UpArrow):    dy = step
+        default: return false
+        }
+        selection.origin = clampedSelectionOrigin(x: selection.minX + dx, y: selection.minY + dy)
+        return true
+    }
+
+    /// 把选区 origin 限制在 bounds 内（选区完整可见；选区大于 bounds 时贴 bounds 原点，
+    /// 避免 clamp 区间反转导致 origin 越界）。
+    private func clampedSelectionOrigin(x: CGFloat, y: CGFloat) -> NSPoint {
+        let maxX = max(bounds.minX, bounds.maxX - selection.width)
+        let maxY = max(bounds.minY, bounds.maxY - selection.height)
+        return NSPoint(x: min(max(x, bounds.minX), maxX), y: min(max(y, bounds.minY), maxY))
+    }
+
+    // MARK: 鼠标光标（角点 crosshair / 选区内 openHand）
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        discardCursorRects()
+        // 选区内部（含角点命中区外扩）：openHand（整体平移）。
+        addCursorRect(selection.insetBy(dx: -2, dy: -2), cursor: .openHand)
+        // 角点周围：crosshair（拖拽改大小）。
+        let cornerSize: CGFloat = 32
+        for point in handlePoints {
+            addCursorRect(
+                NSRect(
+                    x: point.x - cornerSize / 2,
+                    y: point.y - cornerSize / 2,
+                    width: cornerSize,
+                    height: cornerSize
+                ),
+                cursor: .crosshair
+            )
         }
     }
 
@@ -295,6 +419,11 @@ final class ScreenshotSelectionView: NSView {
         return handleBounds.union(actionBarFrame.insetBy(dx: -3, dy: -3)).intersection(bounds)
     }
 
+    /// 平移整个选区（尺寸不变），并限制在 bounds 内保证选区完整可见。
+    private func moveSelection(by delta: NSPoint, fromOrigin origin: NSPoint) {
+        selection.origin = clampedSelectionOrigin(x: origin.x + delta.x, y: origin.y + delta.y)
+    }
+
     private func updateSelection(corner: Corner, point: NSPoint) {
         var minX = selection.minX
         var maxX = selection.maxX
@@ -344,7 +473,7 @@ final class ScreenshotSelectionView: NSView {
         onConfirm?(selectedRect)
     }
 
-    private func cancel() {
+    func cancel() {
         clearImage()
         onCancel?()
     }

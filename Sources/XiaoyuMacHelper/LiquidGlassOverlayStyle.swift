@@ -24,11 +24,15 @@ enum LiquidGlassOverlayStyle {
         return shadow
     }
 
-    static func attributedText(_ text: String, font: NSFont) -> NSAttributedString {
+    static func attributedText(
+        _ text: String,
+        font: NSFont,
+        color: NSColor = primaryTextColor()
+    ) -> NSAttributedString {
         NSAttributedString(
             string: text,
             attributes: [
-                .foregroundColor: primaryTextColor(),
+                .foregroundColor: color,
                 .font: font,
                 .shadow: textShadow()
             ]

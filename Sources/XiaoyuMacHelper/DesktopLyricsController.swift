@@ -537,7 +537,7 @@ final class DesktopLyricsController {
                 isPlaying: isPlaying
             )
         } else {
-            lyricsWindow.orderOut(nil)
+            lyricsWindow.hide()
         }
 
         if settings.isDynamicIslandLyricsEnabled {
@@ -577,7 +577,7 @@ final class DesktopLyricsController {
     }
 
     private func hideAllSurfaces() {
-        lyricsWindow.orderOut(nil)
+        lyricsWindow.hide()
         islandWindow.hide()
         menuBarSurface.hide()
     }

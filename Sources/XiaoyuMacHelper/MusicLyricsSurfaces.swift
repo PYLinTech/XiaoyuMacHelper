@@ -1031,6 +1031,10 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         titleLabel.font = titleFont
     }
 
+    private static func typographicLineHeight(for font: NSFont) -> CGFloat {
+        max(20, ceil(font.ascender - font.descender + font.leading + 2))
+    }
+
     private func compactLyric(primary: String, translation: String?) -> String {
         let cleanTranslation = translation?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let cleanTranslation, !cleanTranslation.isEmpty, cleanTranslation != primary else {
@@ -1061,9 +1065,15 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         let blankLeft = centerX - safeBlankWidth / 2
         let blankRight = centerX + safeBlankWidth / 2
         let sideSafe = Metrics.sideInset + Metrics.horizontalPadding
-        let textHeight = min(
-            max(22, ceil(configuredFontSize + 10)),
-            max(20, size.height - Metrics.topBleed + 2)
+        // 行高取左右两侧实际字体度量（ascender - descender + leading）的较大值，保证大字体时
+        // 文字完整绘制、不被 masksToBounds 裁切，字体大小严格跟随设置。不再用 fontSize+10 的
+        // 估值，也不再被窗口高度钳制——高度不足时文字以大陆可见中心为锚对称溢出，仍然居中。
+        let textHeight = max(
+            22,
+            max(
+                Self.typographicLineHeight(for: titleLabel.font),
+                Self.typographicLineHeight(for: lyricLabel.font)
+            )
         )
         // The continent intentionally bleeds above the top edge of the screen to attach to the
         // MacBook notch.  Center controls inside the actually visible mainland area instead of the
@@ -1176,12 +1186,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         setFrame(targetFrame, display: true)
         layoutLabels(size: targetSize)
         animatePresentationIn(to: targetFrame, targetSize: targetSize, duration: 0.18)
-    }
-
-    private func pulseContentUpdate() {
-        // Intentionally no frame pulse.  Lyric updates happen frequently, so changing the window
-        // size here makes the top-attached continent look jittery.
-        continentView.needsDisplay = true
     }
 
     private func lineIdentityChanged(from old: TimeInterval?, to new: TimeInterval?) -> Bool {
@@ -1306,6 +1310,21 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         return CGFloat(1 - pow(Double(1 - normalized), Double(power)))
     }
 
+    /// A 1.0-returning overshoot envelope: rises to `1 + amount` at `peakAt`, settles back to
+    /// exactly 1.0 by `settleAt`, then stays flat.  Gives the reveal a brief, decisive elastic
+    /// settle instead of an endless spring tail — the last ~8% of the timeline is rock stable.
+    private func settleOvershoot(_ t: CGFloat, peakAt: CGFloat, settleAt: CGFloat, amount: CGFloat) -> CGFloat {
+        let clamped = min(1, max(0, t))
+        if clamped <= peakAt {
+            return 1 + amount * easeOutCubic(clamped / max(0.01, peakAt))
+        }
+        if clamped <= settleAt {
+            let u = (clamped - peakAt) / max(0.01, settleAt - peakAt)
+            return 1 + amount * (1 - smoothstep(u))
+        }
+        return 1
+    }
+
     private func makeKeyframeAnimation(
         keyPath: String,
         values: [NSNumber],
@@ -1337,14 +1356,17 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
 
         for index in 0...steps {
             let t = CGFloat(index) / CGFloat(steps)
-            // Monotonic expand with no overshoot.  Width and height both reach the final value a
-            // little before the timeline ends, so the last frames are visually stable instead of
-            // doing a tiny rebound / correction near the stop point.
+            // Reveal with a brief, decisive elastic settle: width/height reach their target with a
+            // small overshoot that returns to exactly 1.0 well before the timeline ends, so the
+            // last frames stay stable instead of trailing a rebound.  The opacity lands early, so
+            // the silhouette reads as "emerging" while the size does its subtle settle.
             let scaleProgress = easedProgress(t, completesAt: 0.82, power: 3.35)
             let heightProgress = easedProgress(t, completesAt: 0.86, power: 3.55)
-            let opacityProgress = easedProgress(t, completesAt: 0.58, power: 2.9)
-            let scaleX = lerp(state.scaleX, 1, scaleProgress)
-            let scaleY = lerp(state.scaleY, 1, heightProgress)
+            let opacityProgress = easedProgress(t, completesAt: 0.52, power: 2.9)
+            let overshootX = settleOvershoot(t, peakAt: 0.80, settleAt: 0.92, amount: 0.022)
+            let overshootY = settleOvershoot(t, peakAt: 0.82, settleAt: 0.93, amount: 0.014)
+            let scaleX = lerp(state.scaleX, 1, scaleProgress) * overshootX
+            let scaleY = lerp(state.scaleY, 1, heightProgress) * overshootY
             let opacity = CGFloat(state.opacity) + (1 - CGFloat(state.opacity)) * opacityProgress
             xValues.append(NSNumber(value: Double(scaleX)))
             yValues.append(NSNumber(value: Double(scaleY)))
@@ -1375,11 +1397,12 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
 
         for index in 0...steps {
             let t = CGFloat(index) / CGFloat(steps)
-            // Hide should feel decisive, not springy: opacity leaves slightly ahead of the
-            // size change, and the shape contracts monotonically toward the top center.
+            // Hide stays decisive, not springy: opacity leaves well ahead of the size change
+            // (fully transparent by ~72% of the timeline), and the shape contracts monotonically
+            // toward the top center underneath — reading as "drawn up and absorbed", not dropped.
             let scaleProgress = easeInCubic(t)
             let heightProgress = smootherstep(t)
-            let fadeProgress = smoothstep(min(1, t * 1.22))
+            let fadeProgress = smoothstep(min(1, t * 1.38))
             let scaleX = lerp(state.scaleX, endScaleX, scaleProgress)
             let scaleY = lerp(state.scaleY, endScaleY, heightProgress)
             let opacity = CGFloat(state.opacity) * (1 - fadeProgress)
@@ -1459,7 +1482,8 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         to finalOpacity: Float,
         duration: CFTimeInterval,
         delay: CFTimeInterval = 0,
-        timingFunctionName: CAMediaTimingFunctionName = .easeInEaseOut
+        timingFunctionName: CAMediaTimingFunctionName = .easeInEaseOut,
+        translationY: CGFloat = 0
     ) {
         let start = max(Float(0), min(Float(1), startOpacity))
         let end = max(Float(0), min(Float(1), finalOpacity))
@@ -1468,10 +1492,16 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         for view in textContentViews {
             guard let layer = view.layer else { continue }
             layer.removeAnimation(forKey: "dynamicContinentContentOpacity")
+            layer.removeAnimation(forKey: "dynamicContinentContentRise")
 
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             layer.opacity = start
+            if abs(translationY) > 0.1 {
+                layer.setAffineTransform(CGAffineTransform(translationX: 0, y: translationY))
+            } else {
+                layer.setAffineTransform(CGAffineTransform.identity)
+            }
             CATransaction.commit()
 
             let animation = CABasicAnimation(keyPath: "opacity")
@@ -1482,6 +1512,24 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             animation.timingFunction = CAMediaTimingFunction(name: timingFunctionName)
             animation.fillMode = .both
             animation.isRemovedOnCompletion = true
+
+            if abs(translationY) > 0.1 {
+                // A subtle rise that lands before the opacity finishes, so the text "emerges"
+                // instead of just blinking on.  Model transform stays identity; the animation
+                // is removed on completion, so layout/frame is never touched.
+                let rise = CABasicAnimation(keyPath: "transform.translation.y")
+                rise.fromValue = translationY
+                rise.toValue = 0
+                rise.duration = max(0.001, duration * 0.8)
+                rise.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) + max(0, delay)
+                rise.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                rise.fillMode = .both
+                rise.isRemovedOnCompletion = true
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                layer.add(rise, forKey: "dynamicContinentContentRise")
+                CATransaction.commit()
+            }
 
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -1504,13 +1552,15 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
     private func fadeTextContentInAfterPresentation() {
         // Fade from an explicit zero after the background has already settled.  This prevents the
         // glyph layer from becoming visible during any fractional background transform frames.
+        // A subtle 3px rise accompanies the fade so the text "emerges" onto the stable silhouette.
         setTextContentOpacity(0)
         animateTextContentOpacity(
             from: 0,
             to: 1,
-            duration: 0.175,
+            duration: 0.15,
             delay: 0,
-            timingFunctionName: .easeOut
+            timingFunctionName: .easeOut,
+            translationY: 3.0
         )
     }
 
@@ -1752,8 +1802,6 @@ private final class MenuBarLyricsTickerView: NSView {
         var textWidthBucket: Int
         var fontBucket: Int
         var durationBucket: Int
-        var previousBucket: Int
-        var nextBucket: Int
         var wordTimingBucket: Int
     }
 
@@ -1764,15 +1812,10 @@ private final class MenuBarLyricsTickerView: NSView {
 
     private struct TimedScrollPlan {
         var signature: ScrollPlanSignature
-        var startDelay: CFTimeInterval
         var travelDuration: CFTimeInterval
-        var tailHold: CFTimeInterval
         var targetOffset: CGFloat
         var rampFraction: CFTimeInterval
-        var leadInOffset: CGFloat
         var wordAnchors: [WordScrollAnchor]
-
-        var travelEnd: CFTimeInterval { startDelay + travelDuration }
     }
 
     private struct UntimedState {
@@ -1814,6 +1857,7 @@ private final class MenuBarLyricsTickerView: NSView {
         didSet {
             guard oldValue != alignment else { return }
             attributedText = nil
+            invalidateScrollPlan()
             needsDisplay = true
         }
     }
@@ -2105,23 +2149,20 @@ private final class MenuBarLyricsTickerView: NSView {
 
         let visibleWidth = max(1, protectedTextRect().width)
         let textWidth = visibleWidth + maxOffset
-        let current = clamp(duration, 0.14, 42.0)
+        // `duration` is already normalized to [0.14, 42.0] by syncLineTiming; no extra clamp.
         let rampFraction = formulaRampFraction(
-            lineDuration: current,
+            lineDuration: duration,
             viewportWidth: visibleWidth,
             textWidth: textWidth,
             maxOffset: maxOffset
         )
-        let wordAnchors = wordScrollAnchors(duration: current, viewportWidth: visibleWidth, maxOffset: maxOffset)
+        let wordAnchors = wordScrollAnchors(duration: duration, viewportWidth: visibleWidth, maxOffset: maxOffset)
 
         let plan = TimedScrollPlan(
             signature: signature,
-            startDelay: 0,
-            travelDuration: current,
-            tailHold: 0,
+            travelDuration: duration,
             targetOffset: maxOffset,
             rampFraction: rampFraction,
-            leadInOffset: 0,
             wordAnchors: wordAnchors
         )
         cachedPlan = plan
@@ -2196,7 +2237,9 @@ private final class MenuBarLyricsTickerView: NSView {
             }
         case .moving:
             let progress = clamp(elapsed / travelDuration, 0, 1)
-            untimedState.offset = maxOffset * CGFloat(readableMotionCurve(progress, rampFraction: 0.20))
+            // rampFraction 取 formulaRampFraction 输出上限 0.155，与桌面歌词的
+            // untimed 路径一致（0.20 会命中 lineTimelineProgress 内部 clamp 上限）。
+            untimedState.offset = maxOffset * CGFloat(lineTimelineProgress(progress, rampFraction: 0.155))
             untimedState.alpha = 1
             if progress >= 1 {
                 untimedState.offset = maxOffset
@@ -2392,8 +2435,6 @@ private final class MenuBarLyricsTickerView: NSView {
             textWidthBucket: Int((maxOffset / 2).rounded()),
             fontBucket: Int((font.pointSize * 10).rounded()),
             durationBucket: bucket(lineTiming.duration ?? duration),
-            previousBucket: 0,
-            nextBucket: 0,
             wordTimingBucket: wordTimingBucket()
         )
     }
@@ -2494,10 +2535,24 @@ private final class MenuBarLyricsTickerView: NSView {
         return hash
     }
 
+    /// Where in the visible viewport the currently sung word should rest while it scrolls.
+    /// Follows the lyric alignment: left-aligned text parks the active word on the left edge,
+    /// right-aligned parks it on the right edge, centered keeps it at the visual center.
+    private func preferredAnchorCenter(viewportWidth: CGFloat) -> CGFloat {
+        switch alignment {
+        case .left, .natural, .justified:
+            return viewportWidth * 0.12
+        case .right:
+            return viewportWidth * 0.88
+        default:
+            return viewportWidth * 0.47
+        }
+    }
+
     private func wordScrollAnchors(duration: CFTimeInterval, viewportWidth: CGFloat, maxOffset: CGFloat) -> [WordScrollAnchor] {
         guard !wordTimings.isEmpty, maxOffset > 8, viewportWidth > 8 else { return [] }
         let nsText = stringValue as NSString
-        let preferredCenter = viewportWidth * 0.47
+        let preferredCenter = preferredAnchorCenter(viewportWidth: viewportWidth)
         var anchors: [WordScrollAnchor] = [WordScrollAnchor(time: 0, offset: 0)]
         var lastOffset: CGFloat = 0
 
@@ -2654,16 +2709,16 @@ private final class MenuBarLyricsTickerView: NSView {
         )
     }
 
+    /// Maps line progress (0...1) to scroll progress with smooth, asymmetric sine ramps. The
+    /// result starts at 0 and lands exactly on 1 when the line duration elapses.
+    ///
+    /// Invariants: velocity is 0 at both ends and exactly 1/totalArea in the middle span,
+    /// so maxOffset is reached precisely at t = 1. The lower clamps are pure zero-division
+    /// guards — formulaRampFraction already keeps the fraction in [0.018, 0.155].
     private func lineTimelineProgress(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
-        let startRamp = clamp(rampFraction * 1.42 + 0.010, 0.040, 0.190)
-        let endRamp = clamp(rampFraction * 0.92 + 0.006, 0.030, 0.145)
-        return asymmetricTimelineProgress(value, startRamp: startRamp, endRamp: endRamp)
-    }
-
-    private func asymmetricTimelineProgress(_ value: CFTimeInterval, startRamp: CFTimeInterval, endRamp: CFTimeInterval) -> CFTimeInterval {
         let t = clamp(value, 0, 1)
-        let start = clamp(startRamp, 0.001, 0.42)
-        let end = clamp(endRamp, 0.001, min(0.42, 0.92 - start))
+        let start = clamp(rampFraction * 1.42 + 0.010, 0.001, 0.190)
+        let end = clamp(rampFraction * 0.92 + 0.006, 0.001, 0.145)
         let totalArea = max(0.001, 1 - (start + end) / 2)
         if t < start {
             let u = t / start
@@ -2676,10 +2731,6 @@ private final class MenuBarLyricsTickerView: NSView {
             return 1 - tailArea / totalArea
         }
         return (0.5 * start + (t - start)) / totalArea
-    }
-
-    private func readableMotionCurve(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
-        lineTimelineProgress(value, rampFraction: rampFraction)
     }
 
     private func clamp(_ value: CFTimeInterval, _ lower: CFTimeInterval, _ upper: CFTimeInterval) -> CFTimeInterval {
