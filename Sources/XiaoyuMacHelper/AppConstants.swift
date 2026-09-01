@@ -6,6 +6,7 @@ let showControlWindowNotification = Notification.Name("\(appIdentifier).show-con
 let capsLockIndicatorEnabledKey = "CapsLockIndicatorEnabled"
 let capsLockIndicatorClickToDisableEnabledKey = "CapsLockIndicatorClickToDisableEnabled"
 let selectionToolbarEnabledKey = "SelectionToolbarEnabled"
+let selectionToolbarSelectAllEnabledKey = "SelectionToolbarSelectAllEnabled"
 let selectionToolbarCopyEnabledKey = "SelectionToolbarCopyEnabled"
 let selectionToolbarPasteEnabledKey = "SelectionToolbarPasteEnabled"
 let selectionToolbarSearchEnabledKey = "SelectionToolbarSearchEnabled"

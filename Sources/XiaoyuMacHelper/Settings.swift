@@ -3,15 +3,18 @@ import CoreGraphics
 import Foundation
 
 enum ToolbarAction: String, Sendable {
+    case selectAll
     case copy
     case paste
     case search
     case screenshot
 
-    static let configurableCases: [ToolbarAction] = [.copy, .paste, .search, .screenshot]
+    /// 可配置集合：全选默认在最前（默认 order = configurableCases 顺序）。
+    static let configurableCases: [ToolbarAction] = [.selectAll, .copy, .paste, .search, .screenshot]
 
     var title: String {
         switch self {
+        case .selectAll: return "全选"
         case .copy: return "复制"
         case .paste: return "粘贴"
         case .search: return "搜索"
@@ -21,6 +24,7 @@ enum ToolbarAction: String, Sendable {
 
     var shortcutKeyCode: CGKeyCode? {
         switch self {
+        case .selectAll: return CGKeyCode(kVK_ANSI_A)
         case .copy: return CGKeyCode(kVK_ANSI_C)
         case .paste: return CGKeyCode(kVK_ANSI_V)
         case .search, .screenshot: return nil
@@ -29,6 +33,7 @@ enum ToolbarAction: String, Sendable {
 
     var defaultsKey: String? {
         switch self {
+        case .selectAll: return selectionToolbarSelectAllEnabledKey
         case .copy: return selectionToolbarCopyEnabledKey
         case .paste: return selectionToolbarPasteEnabledKey
         case .search: return selectionToolbarSearchEnabledKey
@@ -169,6 +174,7 @@ struct AppSettings: Equatable, Sendable {
     var isCapsLockIndicatorEnabled: Bool
     var isClickToDisableEnabled: Bool
     var isSelectionToolbarEnabled: Bool
+    var isSelectionToolbarSelectAllEnabled: Bool
     var isSelectionToolbarCopyEnabled: Bool
     var isSelectionToolbarPasteEnabled: Bool
     var isSelectionToolbarSearchEnabled: Bool
@@ -222,6 +228,7 @@ struct AppSettings: Equatable, Sendable {
 
     func isSelectionToolbarActionEnabled(_ action: ToolbarAction) -> Bool {
         switch action {
+        case .selectAll: return isSelectionToolbarSelectAllEnabled
         case .copy: return isSelectionToolbarCopyEnabled
         case .paste: return isSelectionToolbarPasteEnabled
         case .search: return isSelectionToolbarSearchEnabled
@@ -231,6 +238,7 @@ struct AppSettings: Equatable, Sendable {
 
     mutating func setSelectionToolbarAction(_ action: ToolbarAction, enabled isEnabled: Bool) {
         switch action {
+        case .selectAll: isSelectionToolbarSelectAllEnabled = isEnabled
         case .copy: isSelectionToolbarCopyEnabled = isEnabled
         case .paste: isSelectionToolbarPasteEnabled = isEnabled
         case .search: isSelectionToolbarSearchEnabled = isEnabled
@@ -267,6 +275,7 @@ final class SettingsStore {
             capsLockIndicatorEnabledKey: true,
             capsLockIndicatorClickToDisableEnabledKey: true,
             selectionToolbarEnabledKey: false,
+            selectionToolbarSelectAllEnabledKey: true,
             selectionToolbarCopyEnabledKey: true,
             selectionToolbarPasteEnabledKey: true,
             selectionToolbarSearchEnabledKey: true,
@@ -352,6 +361,7 @@ final class SettingsStore {
             isCapsLockIndicatorEnabled: defaults.bool(forKey: capsLockIndicatorEnabledKey),
             isClickToDisableEnabled: defaults.bool(forKey: capsLockIndicatorClickToDisableEnabledKey),
             isSelectionToolbarEnabled: defaults.bool(forKey: selectionToolbarEnabledKey),
+            isSelectionToolbarSelectAllEnabled: defaults.bool(forKey: selectionToolbarSelectAllEnabledKey),
             isSelectionToolbarCopyEnabled: defaults.bool(forKey: selectionToolbarCopyEnabledKey),
             isSelectionToolbarPasteEnabled: defaults.bool(forKey: selectionToolbarPasteEnabledKey),
             isSelectionToolbarSearchEnabled: defaults.bool(forKey: selectionToolbarSearchEnabledKey),
@@ -628,8 +638,16 @@ final class SettingsStore {
     private func normalizedOrder(_ savedOrder: [ToolbarAction]) -> [ToolbarAction] {
         var result: [ToolbarAction] = []
 
-        for action in savedOrder where !result.contains(action) {
-            result.append(action)
+        if savedOrder.contains(.selectAll) {
+            for action in savedOrder where !result.contains(action) {
+                result.append(action)
+            }
+        } else {
+            // 首次升级（旧数据无 selectAll）：默认置于最前，其余保持用户原顺序。
+            result.append(.selectAll)
+            for action in savedOrder where !result.contains(action) {
+                result.append(action)
+            }
         }
 
         for action in ToolbarAction.configurableCases where !result.contains(action) {

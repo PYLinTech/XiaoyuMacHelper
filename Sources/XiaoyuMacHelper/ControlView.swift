@@ -72,6 +72,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let accessibilityButton = NSButton(title: "前往设置辅助功能", target: nil, action: nil)
     private let clearDataAndQuitButton = NSButton(title: "清空应用数据并退出", target: nil, action: nil)
     private let quitButton = NSButton(title: "退出", target: nil, action: nil)
+    private let selectAllRow = ActionSettingRow(action: .selectAll)
     private let copyRow = ActionSettingRow(action: .copy)
     private let pasteRow = ActionSettingRow(action: .paste)
     private let searchRow = ActionSettingRow(action: .search, showsSettingsButton: true)
@@ -236,6 +237,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         activeVisionCheckbox.state = settings.isActiveVisionEnabled ? .on : .off
         desktopLyricsCheckbox.state = settings.isDesktopLyricsEnabled ? .on : .off
         clickToDisableCheckbox.state = settings.isClickToDisableEnabled ? .on : .off
+        selectAllRow.setEnabled(settings.isSelectionToolbarSelectAllEnabled)
         copyRow.setEnabled(settings.isSelectionToolbarCopyEnabled)
         pasteRow.setEnabled(settings.isSelectionToolbarPasteEnabled)
         searchRow.setEnabled(settings.isSelectionToolbarSearchEnabled)
@@ -323,7 +325,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         quitButton.target = self
         quitButton.action = #selector(quitClicked)
 
-        [copyRow, pasteRow, searchRow, screenshotRow].forEach { row in
+        [selectAllRow, copyRow, pasteRow, searchRow, screenshotRow].forEach { row in
             row.onToggle = { [weak self] action, isEnabled in self?.onSelectionToolbarActionChanged?(action, isEnabled) }
             row.onMove = { [weak self] action, direction in self?.onSelectionToolbarActionMoved?(action, direction) }
             settingsContentView.addSubview(row)
@@ -1188,6 +1190,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
     private func row(for action: ToolbarAction) -> ActionSettingRow {
         switch action {
+        case .selectAll: return selectAllRow
         case .copy: return copyRow
         case .paste: return pasteRow
         case .search: return searchRow
@@ -1710,7 +1713,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         titleLabel, versionLabel, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard, settingsScrollView,
         loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, clickToDisableCheckbox,
         capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, backButton,
-        loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, copyRow, pasteRow, searchRow, screenshotRow,
+        loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, selectAllRow, copyRow, pasteRow, searchRow, screenshotRow,
         appleMusicSourceRow, qqMusicSourceRow, neteaseSourceRow, searchEnginePopup, searchTemplateField, screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox,
         screenshotRegionCheckbox, activeVisionGazeCheckbox, activeVisionFacingCheckbox, activeVisionNotifyCheckbox,
         desktopLyricsHintLabel, desktopLyricsLanguageLabel, desktopLyricsLanguagePopup,

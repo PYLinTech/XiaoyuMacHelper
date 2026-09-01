@@ -16,6 +16,9 @@ import AppKit
 //   做运行期分流。
 
 /// 液态玻璃视图：macOS 26 用系统原生 NSGlassEffectView，否则用 NSVisualEffectView 模拟。
+///
+/// 所有视觉/样式属性（style / tintColor / cornerRadius / contentView）都透传到 backingView，
+/// 保证 macOS 26 与 macOS 15 行为一致，避免在外层 NSView 上叠一层容器导致子视图坐标系偏移。
 @MainActor
 final class LiquidGlassEffectView: NSView {
     enum Style {
@@ -39,9 +42,15 @@ final class LiquidGlassEffectView: NSView {
         didSet {
             oldValue?.removeFromSuperview()
             guard let contentView else { return }
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *), let glass = backingView as? NSGlassEffectView {
+                glass.contentView = contentView
+                return
+            }
+            #endif
             contentView.frame = bounds
             contentView.autoresizingMask = [.width, .height]
-            addSubview(contentView)
+            backingView.addSubview(contentView)
         }
     }
 
@@ -52,10 +61,10 @@ final class LiquidGlassEffectView: NSView {
         if #available(macOS 26.0, *) {
             backingView = NSGlassEffectView(frame: frameRect)
         } else {
-            backingView = Self.makeFallbackView()
+            backingView = Self.makeFallbackView(frame: frameRect)
         }
         #else
-        backingView = Self.makeFallbackView()
+        backingView = Self.makeFallbackView(frame: frameRect)
         #endif
         super.init(frame: frameRect)
         setup()
@@ -82,11 +91,10 @@ final class LiquidGlassEffectView: NSView {
     override func layout() {
         super.layout()
         backingView.frame = bounds
-        contentView?.frame = bounds
     }
 
-    private static func makeFallbackView() -> NSVisualEffectView {
-        let view = NSVisualEffectView(frame: .zero)
+    private static func makeFallbackView(frame: NSRect) -> NSVisualEffectView {
+        let view = NSVisualEffectView(frame: frame)
         view.material = .hudWindow
         view.blendingMode = .behindWindow
         view.state = .active
@@ -141,19 +149,37 @@ final class LiquidGlassEffectView: NSView {
 }
 
 /// 液态玻璃容器视图：macOS 26 用系统原生 NSGlassEffectContainerView，否则用 NSVisualEffectView 模拟。
+///
+/// spacing / contentView 都透传到 backingView（macOS 26 上是 NSGlassEffectContainerView 系统类）。
+/// 不要在外层 self 上做 contentView inset，否则会导致子视图坐标系原点偏移，
+/// 进而让基于 bounds.height 计算卡片 frame 的布局公式（如 `toolCardFrame.minY = bounds.height - 174`）
+/// 与实际渲染的 glassContentView 坐标系不一致，造成卡片位置错位。
 @MainActor
 final class LiquidGlassContainerView: NSView {
     var spacing: CGFloat = 0 {
-        didSet { layoutContentView() }
+        didSet {
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *), let glass = backingView as? NSGlassEffectContainerView {
+                glass.spacing = spacing
+            }
+            #endif
+        }
     }
 
     var contentView: NSView? {
         didSet {
             oldValue?.removeFromSuperview()
             guard let contentView else { return }
+            contentView.removeFromSuperview()
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *), let glass = backingView as? NSGlassEffectContainerView {
+                glass.contentView = contentView
+                return
+            }
+            #endif
+            contentView.frame = bounds
             contentView.autoresizingMask = [.width, .height]
-            addSubview(contentView)
-            layoutContentView()
+            backingView.addSubview(contentView)
         }
     }
 
@@ -162,14 +188,12 @@ final class LiquidGlassContainerView: NSView {
     override init(frame frameRect: NSRect) {
         #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
-            let container = NSGlassEffectContainerView()
-            container.frame = frameRect
-            backingView = container
+            backingView = NSGlassEffectContainerView(frame: frameRect)
         } else {
-            backingView = Self.makeFallbackView()
+            backingView = Self.makeFallbackView(frame: frameRect)
         }
         #else
-        backingView = Self.makeFallbackView()
+        backingView = Self.makeFallbackView(frame: frameRect)
         #endif
         super.init(frame: frameRect)
         setup()
@@ -193,16 +217,10 @@ final class LiquidGlassContainerView: NSView {
     override func layout() {
         super.layout()
         backingView.frame = bounds
-        layoutContentView()
     }
 
-    private func layoutContentView() {
-        guard let contentView else { return }
-        contentView.frame = bounds.insetBy(dx: spacing, dy: spacing)
-    }
-
-    private static func makeFallbackView() -> NSVisualEffectView {
-        let view = NSVisualEffectView(frame: .zero)
+    private static func makeFallbackView(frame: NSRect) -> NSVisualEffectView {
+        let view = NSVisualEffectView(frame: frame)
         view.material = .underWindowBackground
         view.blendingMode = .behindWindow
         view.state = .active

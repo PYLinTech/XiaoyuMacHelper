@@ -1,14 +1,14 @@
 import AppKit
+import ApplicationServices
 import Carbon
 import CoreGraphics
-import ScreenCaptureKit
+import Darwin
 
 @MainActor
 final class SelectionToolbarController {
     private enum Metrics {
         static let dragThresholdSquared: CGFloat = 36
         static let showDelay: TimeInterval = 0.08
-        static let shortcutDelay: TimeInterval = 0.06
         static let searchReadDelay: TimeInterval = 0.22
     }
 
@@ -150,17 +150,26 @@ final class SelectionToolbarController {
         let pid = selectionTargetPID
         let rect = selectionRect
         reset(shouldHideToolbar: true, hidesToolbarImmediately: action == .screenshot, clearTarget: true)
-        restoreTarget(pid)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + Metrics.shortcutDelay) { [weak self] in
-            switch action {
-            case .copy, .paste:
-                guard let keyCode = action.shortcutKeyCode else { return }
-                Self.postCommandShortcut(keyCode)
-            case .search:
-                self?.copySelectionAndSearch()
-            case .screenshot:
-                self?.captureSelection(rect)
+        switch action {
+        case .copy, .paste, .selectAll:
+            guard let keyCode = action.shortcutKeyCode else { return }
+            injectShortcut(keyCode, targetPID: pid)
+        case .search:
+            copySelectionAndSearch(targetPID: pid)
+        case .screenshot:
+            captureSelection(rect)
+        }
+    }
+
+    /// 等待目标 app 真正成为前台后注入硬件级快捷键，注入失败（如辅助功能权限被撤）时提示用户。
+    private func injectShortcut(_ keyCode: CGKeyCode, targetPID pid: pid_t?) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.activateTarget(pid)
+            let posted = await Self.postCommandShortcut(keyCode)
+            if !posted {
+                self.showToast("快捷键发送失败，请检查辅助功能权限")
             }
         }
     }
@@ -221,23 +230,17 @@ final class SelectionToolbarController {
     }
 
     private func captureImage(in rect: CGRect, completion: @MainActor @Sendable @escaping (CGImage) -> Void) {
-        if #available(macOS 15.2, *) {
-            SCScreenshotManager.captureImage(in: rect) { [weak self] image, error in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    guard let image else {
-                        self.showToast("截图失败")
-                        return
-                    }
+        guard Self.hasScreenCapturePermission() else {
+            CGRequestScreenCaptureAccess()
+            showToast("请在系统设置中允许屏幕录制权限后重试")
+            return
+        }
 
-                    completion(image)
-                }
-            }
-        } else {
-            // macOS 15.0 / 15.1 兼容：使用 SCStream 单帧截图作为降级路径
-            let frameCapture = ScreenFrameCapture()
-            Task { [weak self] in
-                let image = await frameCapture.captureImage(in: rect)
+        DispatchQueue.global(qos: .userInitiated).async {
+            // 通用兼容方案：CGWindowListCreateImage（macOS 10.5+ 全版本可用），
+            // 直接捕获屏幕指定区域（CGDisplay 全局坐标空间，左上原点）。
+            let image = ScreenCaptureShim.captureWindowListImage(in: rect)
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard let image else {
                     self.showToast("截图失败")
@@ -246,6 +249,10 @@ final class SelectionToolbarController {
                 completion(image)
             }
         }
+    }
+
+    private static func hasScreenCapturePermission() -> Bool {
+        CGPreflightScreenCaptureAccess()
     }
 
     private func finishScreenshot(_ image: CGImage) {
@@ -332,23 +339,28 @@ final class SelectionToolbarController {
         return candidate
     }
 
-    private func copySelectionAndSearch() {
-        let pasteboard = NSPasteboard.general
-        let beforeChangeCount = pasteboard.changeCount
-        Self.postCommandShortcut(CGKeyCode(kVK_ANSI_C))
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + Metrics.searchReadDelay) { [weak self] in
+    private func copySelectionAndSearch(targetPID pid: pid_t?) {
+        Task { [weak self] in
             guard let self else { return }
-            let text = pasteboard.changeCount == beforeChangeCount
-                ? nil
-                : Self.searchableText(from: pasteboard)
+            await self.activateTarget(pid)
 
-            guard let text, !text.isEmpty else {
-                self.showToast("请选中文本进行搜索")
-                return
+            let pasteboard = NSPasteboard.general
+            let beforeChangeCount = pasteboard.changeCount
+            _ = await Self.postCommandShortcut(CGKeyCode(kVK_ANSI_C))
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + Metrics.searchReadDelay) { [weak self] in
+                guard let self else { return }
+                let text = pasteboard.changeCount == beforeChangeCount
+                    ? nil
+                    : Self.searchableText(from: pasteboard)
+
+                guard let text, !text.isEmpty else {
+                    self.showToast("请选中文本进行搜索")
+                    return
+                }
+
+                self.openSearch(for: text)
             }
-
-            self.openSearch(for: text)
         }
     }
 
@@ -372,11 +384,20 @@ final class SelectionToolbarController {
         toastWindow.show(message: message)
     }
 
-    private func restoreTarget(_ pid: pid_t?) {
+    /// 激活目标 app 并等待其成为前台（12ms 轮询、最长 800ms）。
+    /// 确保后续注入的硬件快捷键落在目标 app 上，而不是工具栏窗口或残留焦点。
+    private func activateTarget(_ pid: pid_t?) async {
         guard let pid, let app = NSRunningApplication(processIdentifier: pid), !app.isActive else {
             return
         }
+
         app.activate(options: [])
+        let deadline = Date().addingTimeInterval(0.8)
+        while !app.isActive
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier != pid
+            && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 12_000_000)
+        }
     }
 
     private func reset(shouldHideToolbar: Bool, hidesToolbarImmediately: Bool = false, clearTarget: Bool) {
@@ -412,18 +433,29 @@ final class SelectionToolbarController {
             .replacingOccurrences(of: "%20", with: "+")
     }
 
-    private static func postCommandShortcut(_ keyCode: CGKeyCode) {
+    /// 注入 Cmd+快捷键的完整硬件事件序列：Cmd down → key down → key up → Cmd up。
+    /// 事件间保留真实按键的微小时序间隔，避免 down/up 同毫秒触发导致部分应用
+    /// （Electron、远程桌面、旧 AppKit）丢弃按键。
+    /// 硬件事件合成需要辅助功能或输入监控权限，权限不足时提前返回 false。
+    @discardableResult
+    private static func postCommandShortcut(_ keyCode: CGKeyCode) async -> Bool {
+        guard canSynthesizeEvents() else { return false }
         let source = CGEventSource(stateID: .hidSystemState)
         let commandKeyCode = CGKeyCode(kVK_Command)
 
-        [
-            (commandKeyCode, true, CGEventFlags.maskCommand),
-            (keyCode, true, CGEventFlags.maskCommand),
-            (keyCode, false, CGEventFlags.maskCommand),
-            (commandKeyCode, false, CGEventFlags(rawValue: 0))
-        ].forEach { step in
-            postKey(step.0, isDown: step.1, flags: step.2, source: source)
-        }
+        postKey(commandKeyCode, isDown: true, flags: .maskCommand, source: source)
+        try? await Task.sleep(nanoseconds: 12_000_000)
+        postKey(keyCode, isDown: true, flags: .maskCommand, source: source)
+        try? await Task.sleep(nanoseconds: 25_000_000)
+        postKey(keyCode, isDown: false, flags: .maskCommand, source: source)
+        try? await Task.sleep(nanoseconds: 12_000_000)
+        postKey(commandKeyCode, isDown: false, flags: [], source: source)
+        return true
+    }
+
+    /// 硬件事件合成（CGEventPost 到 HID 层）所需权限：辅助功能或输入监控任一满足即可。
+    private static func canSynthesizeEvents() -> Bool {
+        AXIsProcessTrusted() || CGPreflightPostEventAccess()
     }
 
     private static func postKey(
@@ -432,9 +464,42 @@ final class SelectionToolbarController {
         flags: CGEventFlags,
         source: CGEventSource?
     ) {
-        let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: isDown)
-        event?.flags = flags
-        event?.post(tap: .cghidEventTap)
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: isDown) else {
+            return
+        }
+        event.flags = flags
+        event.post(tap: .cghidEventTap)
+    }
+}
+
+/// 通用截图 shim：CGWindowListCreateImage 自 macOS 10.5 起存在，
+/// 但 macOS 15 SDK 将其标记为 obsoleted，编译期不可直接调用。
+/// 运行时符号始终存在，通过 dlsym 动态解析，获得跨系统版本的通用截图能力。
+private enum ScreenCaptureShim {
+    private typealias CaptureFn = @convention(c) (
+        CGRect,
+        UInt32,
+        UInt32,
+        UInt32
+    ) -> Unmanaged<CGImage>?
+
+    private static let capture: CaptureFn? = {
+        // CoreGraphics 为常驻系统框架，dlopen 后不关闭，符号在进程生命周期内有效。
+        guard let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY) else { return nil }
+        guard let symbol = dlsym(handle, "CGWindowListCreateImage") else { return nil }
+        return unsafeBitCast(symbol, to: CaptureFn.self)
+    }()
+
+    /// 捕获屏幕全局坐标（左上原点）中 rect 区域的画面，返回全分辨率图像。
+    static func captureWindowListImage(in rect: CGRect) -> CGImage? {
+        guard let capture else { return nil }
+        let image = capture(
+            rect,
+            CGWindowListOption.optionAll.rawValue,
+            kCGNullWindowID,
+            CGWindowImageOption.bestResolution.rawValue | CGWindowImageOption.boundsIgnoreFraming.rawValue
+        )
+        return image?.takeRetainedValue()
     }
 }
 
