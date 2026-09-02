@@ -23,17 +23,22 @@ enum UpdateInstaller {
 
     // MARK: - 主进程侧
 
-    /// 下载 DMG（URLSession 自动跟随重定向）到 Updates 目录，每次先清空旧缓存。
-    static func download(assetURL: URL) async throws -> URL {
-        let (temporaryURL, response) = try await URLSession.shared.download(from: assetURL)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw UpdateError.downloadFailed
+    /// 下载 DMG（自动跟随重定向）到 Updates 目录，每次先清空旧缓存。
+    /// `progress` 在后台线程按 0...1 回调下载进度（线程安全，自行 hop 主线程）。
+    static func download(assetURL: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws -> URL {
+        let delegate = DownloadProgressDelegate(
+            updatesRoot: updatesRoot,
+            destinationName: assetURL.lastPathComponent,
+            progress: progress
+        )
+        let configuration = URLSessionConfiguration.default
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        let task = session.downloadTask(with: assetURL)
+        let destination = try await withCheckedThrowingContinuation { continuation in
+            delegate.prepare(continuation: continuation)
+            task.resume()
         }
-        let fileManager = FileManager.default
-        try? fileManager.removeItem(at: updatesRoot)
-        try fileManager.createDirectory(at: updatesRoot, withIntermediateDirectories: true)
-        let destination = updatesRoot.appendingPathComponent(assetURL.lastPathComponent)
-        try fileManager.moveItem(at: temporaryURL, to: destination)
+        session.invalidateAndCancel()
         return destination
     }
 
@@ -213,5 +218,81 @@ enum UpdateInstaller {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { return nil }
         return String(data: outputData, encoding: .utf8)
+    }
+}
+
+/// URLSessionDownloadDelegate 下载代理：didWriteData 上报 0...1 进度，完成后移动文件并 resume continuation。
+/// 回调在 URLSession 后台队列触发，进度闭包为 @Sendable，内部自行 hop 主线程。
+private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let updatesRoot: URL
+    private let destinationName: String
+    private let progress: (@Sendable (Double) -> Void)?
+    private var continuation: CheckedContinuation<URL, Error>?
+    private let lock = NSLock()
+
+    init(updatesRoot: URL, destinationName: String, progress: (@Sendable (Double) -> Void)?) {
+        self.updatesRoot = updatesRoot
+        self.destinationName = destinationName
+        self.progress = progress
+        super.init()
+    }
+
+    func prepare(continuation: CheckedContinuation<URL, Error>) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    // MARK: - URLSessionDownloadDelegate
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let fraction = min(max(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite), 0), 1)
+        progress?(fraction)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        let result: Result<URL, Error>
+        if let http = downloadTask.response as? HTTPURLResponse, http.statusCode == 200 {
+            let fileManager = FileManager.default
+            do {
+                try? fileManager.removeItem(at: updatesRoot)
+                try fileManager.createDirectory(at: updatesRoot, withIntermediateDirectories: true)
+                let destination = updatesRoot.appendingPathComponent(destinationName)
+                try fileManager.moveItem(at: location, to: destination)
+                result = .success(destination)
+            } catch {
+                result = .failure(UpdateError.downloadFailed)
+            }
+        } else {
+            result = .failure(UpdateError.downloadFailed)
+        }
+        finish(with: result)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            finish(with: .failure(error))
+        }
+    }
+
+    // MARK: - 完成
+
+    private func finish(with result: Result<URL, Error>) {
+        lock.lock()
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
     }
 }

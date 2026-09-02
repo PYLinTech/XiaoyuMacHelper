@@ -31,6 +31,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private var lastRenderedControlState: ControlState?
     private var previousCapsLockState: Bool?
     private var isUpdateCheckInProgress = false
+    private var updateAlertWindow: UpdateAlertWindow?
 
     init(instanceLock: SingleInstanceLock, launchMode: LaunchMode) {
         self.instanceLock = instanceLock
@@ -121,13 +122,8 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     // MARK: - 自更新
 
-    /// 启动时自动检查（24 小时节流；失败不记账，下次启动重试）。
+    /// 每次启动都检查更新，无节流。检查失败静默（无网络等），不打扰用户。
     private func scheduleAutoUpdateCheck() {
-        let defaults = UserDefaults.standard
-        if let lastCheck = defaults.object(forKey: lastUpdateCheckDateKey) as? Date,
-           Date().timeIntervalSince(lastCheck) < updateCheckInterval {
-            return
-        }
         Task { @MainActor [weak self] in
             self?.checkForUpdates(userInitiated: false)
         }
@@ -148,10 +144,12 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         do {
             payload = try await UpdateChecker.checkLatest()
         } catch {
-            presentUpdateFailure(pageURL: UpdateChannel.fallbackReleaseURL, reason: error.localizedDescription)
+            // 自动检查失败静默；手动点击"检查更新"失败才走网页兜底。
+            if userInitiated {
+                presentUpdateFailure(pageURL: UpdateChannel.fallbackReleaseURL, reason: error.localizedDescription)
+            }
             return
         }
-        UserDefaults.standard.set(Date(), forKey: lastUpdateCheckDateKey)
 
         guard let remote = payload.latestVersion,
               let local = UpdateChecker.localVersion,
@@ -166,47 +164,60 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let notes = payload.body.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
-        let message = [
-            notes,
-            "当前版本 v\(local)，发现新版本 v\(remote)。是否立即下载并更新？"
-        ]
-        .compactMap { $0 }
-        .joined(separator: "\n\n")
+        presentUpdatePrompt(payload: payload, local: local, remote: remote)
+    }
 
-        let shouldUpdate = AlertPresenter.show(
-            title: "发现新版本 v\(remote)",
-            message: message,
-            buttons: ["立即更新", "稍后"]
-        ) == .alertFirstButtonReturn
-        guard shouldUpdate else { return }
-        await installUpdate(payload: payload)
+    /// 弹出自绘更新确认窗（图标 + 更新日志 + 版本对比 + 立即更新/稍后）。
+    private func presentUpdatePrompt(payload: UpdatePayload, local: Version, remote: Version) {
+        updateAlertWindow?.close()
+        updateAlertWindow = nil
+
+        let notes = payload.body.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "暂无更新说明。"
+        let window = UpdateAlertWindow(currentVersion: local, latestVersion: remote, notes: notes)
+        window.onInstall = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.installUpdate(payload: payload)
+            }
+        }
+        window.onLater = { [weak self] in
+            self?.updateAlertWindow = nil
+        }
+        updateAlertWindow = window
+        window.show()
     }
 
     /// 下载 → 解包 → 三层校验 → 拉起更新辅助进程 → 退出本进程。
+    /// 弹窗进入安装模式，下载进度实时回填进度条。
     private func installUpdate(payload: UpdatePayload) async {
-        let result = await Task.detached(priority: .userInitiated) {
-            do {
-                guard let assetURL = payload.primaryAssetURL else { throw UpdateError.invalidPayload }
-                let dmgURL = try await UpdateInstaller.download(assetURL: assetURL)
-                let stagedApp = try UpdateInstaller.extractApp(fromDMG: dmgURL)
+        guard let alertWindow = updateAlertWindow else { return }
+        alertWindow.enterInstallingMode()
+
+        do {
+            guard let assetURL = payload.primaryAssetURL else { throw UpdateError.invalidPayload }
+            alertWindow.setStatus("正在下载更新包…")
+            let dmgURL = try await UpdateInstaller.download(assetURL: assetURL) { [weak alertWindow] fraction in
+                Task { @MainActor in
+                    alertWindow?.setProgress(fraction)
+                }
+            }
+            alertWindow.setProgress(1)
+            alertWindow.setStatus("正在校验并安装更新包…")
+            let stagedApp = try await Task.detached(priority: .userInitiated) {
+                let staged = try UpdateInstaller.extractApp(fromDMG: dmgURL)
                 let targetApp = Bundle.main.bundleURL
-                guard UpdateInstaller.verify(newApp: stagedApp, targetApp: targetApp) else {
+                guard UpdateInstaller.verify(newApp: staged, targetApp: targetApp) else {
                     throw UpdateError.verificationFailed
                 }
-                try UpdateInstaller.launchUpdater(newApp: stagedApp, targetApp: targetApp)
-                return Result<Void, UpdateError>.success(())
-            } catch let error as UpdateError {
-                return .failure(error)
-            } catch {
-                return .failure(.downloadFailed)
-            }
-        }.value
-
-        switch result {
-        case .success:
+                try UpdateInstaller.launchUpdater(newApp: staged, targetApp: targetApp)
+                return staged
+            }.value
+            _ = stagedApp
             NSApp.terminate(nil)
-        case let .failure(error):
+        } catch {
+            updateAlertWindow?.forceClose()
+            updateAlertWindow = nil
             presentUpdateFailure(pageURL: payload.fallbackHTMLURL, reason: error.localizedDescription)
         }
     }
