@@ -7,6 +7,7 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
     var onCapsLockIndicatorChanged: ((Bool) -> Void)?
     var onClickToDisableChanged: ((Bool) -> Void)?
     var onSelectionToolbarChanged: ((Bool) -> Void)?
+    var onSelectionToolbarHideInFullscreenChanged: ((Bool) -> Void)?
     var onActiveVisionChanged: ((Bool) -> Void)?
     var onDesktopLyricsChanged: ((Bool) -> Void)?
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
@@ -86,6 +87,7 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
         controlView.onCapsLockIndicatorChanged = { [weak self] isEnabled in self?.onCapsLockIndicatorChanged?(isEnabled) }
         controlView.onClickToDisableChanged = { [weak self] isEnabled in self?.onClickToDisableChanged?(isEnabled) }
         controlView.onSelectionToolbarChanged = { [weak self] isEnabled in self?.onSelectionToolbarChanged?(isEnabled) }
+        controlView.onSelectionToolbarHideInFullscreenChanged = { [weak self] isEnabled in self?.onSelectionToolbarHideInFullscreenChanged?(isEnabled) }
         controlView.onActiveVisionChanged = { [weak self] isEnabled in self?.onActiveVisionChanged?(isEnabled) }
         controlView.onDesktopLyricsChanged = { [weak self] isEnabled in self?.onDesktopLyricsChanged?(isEnabled) }
         controlView.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.onSelectionToolbarActionChanged?(action, isEnabled) }

@@ -749,14 +749,17 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
     private var hoverRestoreTimer: Timer?
     private var hoverHiddenRestoreFrame: NSRect?
     private var presentationAnimationGeneration = 0
-    private var pendingTextFadeInWorkItem: DispatchWorkItem?
     private var baseSize = NSSize(width: Metrics.defaultWidth, height: Metrics.defaultHeight)
     private var currentTitleText = ""
     private var currentLyricText = ""
     private var currentLineIdentity: TimeInterval?
 
+    /// 淡入/淡出的目标视图。逐个对子视图(频谱/标题/歌词)的 layer 直接做透明度动画,
+    /// 容器 textContainerView 始终保持不透明(恒 1)。若对容器层整体做 opacity 动画,
+    /// 子视图 layer 会被合入非不透明父层,触发离屏合成路径——文字淡入帧上可能产生
+    /// 垂直方向的合成伪影,表现为"文本出现瞬间从上向下位移"。逐原子视图动画可绕开该路径。
     private var textContentViews: [NSView] {
-        [textContainerView]
+        [spectrumView, titleLabel, lyricLabel]
     }
 
     init() {
@@ -794,6 +797,8 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         }
 
         spectrumView.accentColor = NSColor.white.withAlphaComponent(0.88)
+        spectrumView.wantsLayer = true
+        spectrumView.layer?.zPosition = 8
         audioSpectrumMonitor.onLevels = { [weak self] levels in
             self?.spectrumView.setAudioLevels(levels)
         }
@@ -804,8 +809,8 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             }
         }
 
-        titleLabel.font = Self.configuredFont(familyName: "", size: Metrics.defaultFontSize - 2.4, weight: .medium, managerWeight: 6)
-        titleLabel.textColor = NSColor.white.withAlphaComponent(0.70)
+        titleLabel.font = Self.configuredFont(familyName: "", size: Metrics.defaultFontSize, weight: .semibold, managerWeight: 8)
+        titleLabel.textColor = .white
         titleLabel.scrollSpeed = 24
         titleLabel.fadeEdgeWidth = 18
         titleLabel.contentInsetX = 24
@@ -829,6 +834,9 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         textContainerView.wantsLayer = true
         textContainerView.canDrawSubviewsIntoLayer = false
         textContainerView.layer?.backgroundColor = NSColor.clear.cgColor
+        // 容器层恒定不透明(默认 1),透明度只作用于子视图——避免非不透明父层触发离屏
+        // 合成路径,导致淡入帧上子视图内容出现垂直合成伪影("文字显示瞬间从上向下位移")。
+        textContainerView.layer?.opacity = 1
         textContainerView.layer?.zPosition = 8
         continentView.layer?.zPosition = 0
 
@@ -946,10 +954,14 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             orderFrontRegardless()
             animatePresentationIn(to: targetFrame, targetSize: displaySize)
         } else {
-            layoutLabels(size: displaySize)
-            if !NSEqualRects(frame, targetFrame) {
+            let frameChanged = !NSEqualRects(frame, targetFrame)
+            if frameChanged {
                 setFrame(targetFrame, display: true)
-            } else if didTextChange || didLineChange {
+                layoutLabels(size: displaySize)
+            } else if (didTextChange || didLineChange),
+                      !(continentView.layer.map(hasRunningPresentationAnimation(on:)) ?? false) {
+                // 标签/大陆的 frame 只随设置变化，行切换只需更新文字内部绘制，无需重排。
+                // 变换动画进行中跳过 needsDisplay，避免在运动帧上重绘大陆导致整片闪烁。
                 continentView.needsDisplay = true
             }
         }
@@ -958,7 +970,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
 
     func hide() {
         guard isPresented || isVisible else { return }
-        cancelPendingTextFadeIn()
         isPresented = false
         isHovering = false
         isHiddenForMouseHover = false
@@ -1015,20 +1026,16 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
     }
 
     private func applyConfiguredFonts() {
-        let lyricFont = Self.configuredFont(
+        // 标题与歌词字体完全一致：同字号（configuredFontSize）、同字重（.semibold/8），
+        // 颜色同为纯白——不保留任何视觉主次区分。
+        let contentFont = Self.configuredFont(
             familyName: configuredFontName,
             size: configuredFontSize,
             weight: .semibold,
             managerWeight: 8
         )
-        let titleFont = Self.configuredFont(
-            familyName: configuredFontName,
-            size: max(Metrics.minFontSize, configuredFontSize - 2.4),
-            weight: .medium,
-            managerWeight: 6
-        )
-        lyricLabel.font = lyricFont
-        titleLabel.font = titleFont
+        lyricLabel.font = contentFont
+        titleLabel.font = contentFont
     }
 
     private static func typographicLineHeight(for font: NSFont) -> CGFloat {
@@ -1050,10 +1057,20 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
     }
 
     private func layoutLabels(size: NSSize) {
-        rootView.frame = NSRect(origin: .zero, size: size)
+        // 布局基准与窗口系统权威内容区对齐：若窗口 frame 尚未同步到请求尺寸，先 setFrame 一次
+        // （同步刷新 contentLayoutRect），再以 contentLayoutRect 布局。日志实测 setFrame 后系统
+        // 实际布局高度可能与请求 size 差 1pt（写入 37 会被滞后布局弹回 36），若按请求 size 布局，
+        // 容器与文字 y 会出现 1pt 脉冲，落在文字淡入窗口内即表现为“文本一显示就从上向下位移”。
+        if !NSEqualSizes(frame.size, size) {
+            setFrame(continentFrame(size: size), display: true)
+        }
+        let resolvedSize = contentLayoutRect.size
+        let layoutSize = (resolvedSize.width > 20 && resolvedSize.height > 8) ? resolvedSize : size
+        rootView.frame = NSRect(origin: .zero, size: layoutSize)
         rootView.layer?.contentsScale = backingScaleFactor > 0 ? backingScaleFactor : (screen?.backingScaleFactor ?? 2)
-        continentView.frame = NSRect(origin: .zero, size: size)
-        textContainerView.frame = NSRect(origin: .zero, size: size)
+        continentView.frame = NSRect(origin: .zero, size: layoutSize)
+        textContainerView.frame = NSRect(origin: .zero, size: layoutSize)
+        let size = layoutSize
         let widthScale = baseSize.width > 0 ? size.width / baseSize.width : 1
         let safeBlankWidth = min(
             configuredBlankWidth * widthScale,
@@ -1185,7 +1202,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         let targetSize = targetFrame.size
         setFrame(targetFrame, display: true)
         layoutLabels(size: targetSize)
-        animatePresentationIn(to: targetFrame, targetSize: targetSize, duration: 0.18)
+        animatePresentationIn(to: targetFrame, targetSize: targetSize)
     }
 
     private func lineIdentityChanged(from old: TimeInterval?, to new: TimeInterval?) -> Bool {
@@ -1227,7 +1244,9 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         layer.zPosition = 0
         layer.masksToBounds = false
         layer.allowsEdgeAntialiasing = true
-        layer.drawsAsynchronously = true
+        // 大陆只在状态切换/悬停时重绘，同步绘制即可：异步绘制会让入场首帧内容迟到，
+        // 表现为上屏瞬间大陆先空白/旧内容、随后再补上（即“整个大陆闪烁”的来源之一）。
+        layer.drawsAsynchronously = false
         layer.contentsScale = backingScaleFactor
         layer.rasterizationScale = backingScaleFactor > 0 ? backingScaleFactor : (screen?.backingScaleFactor ?? 2)
         layer.anchorPoint = CGPoint(x: 0.5, y: 1.0)
@@ -1259,12 +1278,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             || keys.contains("dynamicContinentScaleX")
             || keys.contains("dynamicContinentScaleY")
             || keys.contains("dynamicContinentOpacity")
-    }
-
-    private func easeOutCubic(_ t: CGFloat) -> CGFloat {
-        let clamped = min(1, max(0, t))
-        let inverse = 1 - clamped
-        return 1 - inverse * inverse * inverse
     }
 
     private func easeInCubic(_ t: CGFloat) -> CGFloat {
@@ -1310,21 +1323,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         return CGFloat(1 - pow(Double(1 - normalized), Double(power)))
     }
 
-    /// A 1.0-returning overshoot envelope: rises to `1 + amount` at `peakAt`, settles back to
-    /// exactly 1.0 by `settleAt`, then stays flat.  Gives the reveal a brief, decisive elastic
-    /// settle instead of an endless spring tail — the last ~8% of the timeline is rock stable.
-    private func settleOvershoot(_ t: CGFloat, peakAt: CGFloat, settleAt: CGFloat, amount: CGFloat) -> CGFloat {
-        let clamped = min(1, max(0, t))
-        if clamped <= peakAt {
-            return 1 + amount * easeOutCubic(clamped / max(0.01, peakAt))
-        }
-        if clamped <= settleAt {
-            let u = (clamped - peakAt) / max(0.01, settleAt - peakAt)
-            return 1 + amount * (1 - smoothstep(u))
-        }
-        return 1
-    }
-
     private func makeKeyframeAnimation(
         keyPath: String,
         values: [NSNumber],
@@ -1356,17 +1354,15 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
 
         for index in 0...steps {
             let t = CGFloat(index) / CGFloat(steps)
-            // Reveal with a brief, decisive elastic settle: width/height reach their target with a
-            // small overshoot that returns to exactly 1.0 well before the timeline ends, so the
-            // last frames stay stable instead of trailing a rebound.  The opacity lands early, so
-            // the silhouette reads as "emerging" while the size does its subtle settle.
-            let scaleProgress = easedProgress(t, completesAt: 0.82, power: 3.35)
-            let heightProgress = easedProgress(t, completesAt: 0.86, power: 3.55)
-            let opacityProgress = easedProgress(t, completesAt: 0.52, power: 2.9)
-            let overshootX = settleOvershoot(t, peakAt: 0.80, settleAt: 0.92, amount: 0.022)
-            let overshootY = settleOvershoot(t, peakAt: 0.82, settleAt: 0.93, amount: 0.014)
-            let scaleX = lerp(state.scaleX, 1, scaleProgress) * overshootX
-            let scaleY = lerp(state.scaleY, 1, heightProgress) * overshootY
+            // 入场采用“单调逼近”曲线：尺寸从收缩态一路缓到 1.0，全程不越过终态（无 overshoot）。
+            // 旧版 1.4%–2.2% 的弹性回弹正是“显示时轻微放大”的来源，回弹收尾的亚像素运动还会让
+            // 大陆边缘反复重采样、产生抖动闪烁。现在宽度先到位、高度稍后跟上；透明度提前完成，
+            // 轮廓先“浮现”再“定形”，观感从“弹一下”变成自然地“长出来”。
+            let scaleProgress = easedProgress(t, completesAt: 0.86, power: 4.6)
+            let heightProgress = easedProgress(t, completesAt: 0.91, power: 5.2)
+            let opacityProgress = easedProgress(t, completesAt: 0.55, power: 2.8)
+            let scaleX = lerp(state.scaleX, 1, scaleProgress)
+            let scaleY = lerp(state.scaleY, 1, heightProgress)
             let opacity = CGFloat(state.opacity) + (1 - CGFloat(state.opacity)) * opacityProgress
             xValues.append(NSNumber(value: Double(scaleX)))
             yValues.append(NSNumber(value: Double(scaleY)))
@@ -1417,30 +1413,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         return (xValues, yValues, opacityValues, keyTimes)
     }
 
-    private func cancelPendingTextFadeIn() {
-        pendingTextFadeInWorkItem?.cancel()
-        pendingTextFadeInWorkItem = nil
-    }
-
-    private func scheduleTextContentFadeIn(after delay: TimeInterval, generation: Int) {
-        cancelPendingTextFadeIn()
-        var scheduledWorkItem: DispatchWorkItem?
-        let workItem = DispatchWorkItem { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      (scheduledWorkItem?.isCancelled ?? true) == false,
-                      self.presentationAnimationGeneration == generation,
-                      self.isPresented || self.isVisible
-                else { return }
-                self.fadeTextContentInAfterPresentation()
-                self.pendingTextFadeInWorkItem = nil
-            }
-        }
-        scheduledWorkItem = workItem
-        pendingTextFadeInWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: workItem)
-    }
-
     private func prepareTextContentLayers() {
         let scale = backingScaleFactor > 0 ? backingScaleFactor : (screen?.backingScaleFactor ?? 2)
         for view in textContentViews {
@@ -1482,8 +1454,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         to finalOpacity: Float,
         duration: CFTimeInterval,
         delay: CFTimeInterval = 0,
-        timingFunctionName: CAMediaTimingFunctionName = .easeInEaseOut,
-        translationY: CGFloat = 0
+        timingFunctionName: CAMediaTimingFunctionName = .easeInEaseOut
     ) {
         let start = max(Float(0), min(Float(1), startOpacity))
         let end = max(Float(0), min(Float(1), finalOpacity))
@@ -1492,16 +1463,10 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         for view in textContentViews {
             guard let layer = view.layer else { continue }
             layer.removeAnimation(forKey: "dynamicContinentContentOpacity")
-            layer.removeAnimation(forKey: "dynamicContinentContentRise")
 
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             layer.opacity = start
-            if abs(translationY) > 0.1 {
-                layer.setAffineTransform(CGAffineTransform(translationX: 0, y: translationY))
-            } else {
-                layer.setAffineTransform(CGAffineTransform.identity)
-            }
             CATransaction.commit()
 
             let animation = CABasicAnimation(keyPath: "opacity")
@@ -1512,24 +1477,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             animation.timingFunction = CAMediaTimingFunction(name: timingFunctionName)
             animation.fillMode = .both
             animation.isRemovedOnCompletion = true
-
-            if abs(translationY) > 0.1 {
-                // A subtle rise that lands before the opacity finishes, so the text "emerges"
-                // instead of just blinking on.  Model transform stays identity; the animation
-                // is removed on completion, so layout/frame is never touched.
-                let rise = CABasicAnimation(keyPath: "transform.translation.y")
-                rise.fromValue = translationY
-                rise.toValue = 0
-                rise.duration = max(0.001, duration * 0.8)
-                rise.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) + max(0, delay)
-                rise.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                rise.fillMode = .both
-                rise.isRemovedOnCompletion = true
-                CATransaction.begin()
-                CATransaction.setDisableActions(true)
-                layer.add(rise, forKey: "dynamicContinentContentRise")
-                CATransaction.commit()
-            }
 
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -1549,21 +1496,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         )
     }
 
-    private func fadeTextContentInAfterPresentation() {
-        // Fade from an explicit zero after the background has already settled.  This prevents the
-        // glyph layer from becoming visible during any fractional background transform frames.
-        // A subtle 3px rise accompanies the fade so the text "emerges" onto the stable silhouette.
-        setTextContentOpacity(0)
-        animateTextContentOpacity(
-            from: 0,
-            to: 1,
-            duration: 0.15,
-            delay: 0,
-            timingFunctionName: .easeOut,
-            translationY: 3.0
-        )
-    }
-
     private func animatePresentationLayer(
         layer: CALayer,
         from state: PresentationState,
@@ -1577,7 +1509,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         presentationAnimationGeneration += 1
         let generation = presentationAnimationGeneration
 
-        cancelPendingTextFadeIn()
         let startContentOpacity = contentOpacityState()
 
         layer.removeAnimation(forKey: "dynamicContinentTransform")
@@ -1603,8 +1534,14 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         layer.shouldRasterize = false
         layer.setAffineTransform(CGAffineTransform(scaleX: startState.scaleX, y: startState.scaleY))
         layer.opacity = startState.opacity
+        // 入场时文字瞬时置零，不做旧的 30ms“闪出”：背景在任何运动帧上都叠不到文字，
+        // 根除“文字在背景缩放帧上被重栅格化而闪烁”的路径；退场则从当前可见度平滑淡出。
+        // 透明度只作用于子视图（textContentViews 已为原子视图列表）；容器层恒为不透明 1，
+        // 不做离屏合成，杜绝淡入帧上的垂直合成伪影。
+        textContainerView.layer?.opacity = 1
+        textContainerView.layer?.removeAnimation(forKey: "dynamicContinentContentOpacity")
         for view in textContentViews {
-            view.layer?.opacity = startContentOpacity
+            view.layer?.opacity = isShowing ? 0 : startContentOpacity
         }
         CATransaction.commit()
 
@@ -1630,13 +1567,13 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             duration: duration
         )
 
-        let textFadeOutDuration = isShowing
-            ? min(0.034, max(0.018, duration * 0.18))
-            : min(0.030, max(0.014, duration * 0.26))
-        // Text never participates in the background scale/rebound.  It leaves immediately at the
-        // start of show/hide, stays fully invisible while the silhouette moves, and only fades
-        // back after the background has reached its final stable frame.
-        fadeTextContentOutForPresentation(from: startContentOpacity, duration: textFadeOutDuration)
+        // 入场时文字保持全隐（上方事务已置 0），淡入推迟到背景动画完成回调里再触发——
+        // 见下方 completion 块。若在此处调度带 delay 的淡入，淡入窗口会与背景尾部收敛及
+        // completion 内的 setFrame/layoutLabels 重排重叠，文字半透明时被挪动即表现为“上下弹跳”。
+        if !isShowing {
+            let textFadeOutDuration = min(0.030, max(0.014, duration * 0.26))
+            fadeTextContentOutForPresentation(from: startContentOpacity, duration: textFadeOutDuration)
+        }
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1650,19 +1587,32 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
                 layer.shouldRasterize = false
                 layer.setAffineTransform(CGAffineTransform(scaleX: finalScaleX, y: finalScaleY))
                 layer.opacity = endOpacity
-                for view in self.textContentViews {
-                    view.layer?.removeAnimation(forKey: "dynamicContinentContentOpacity")
-                    view.layer?.opacity = 0
-                }
                 CATransaction.commit()
                 completion?()
                 if isShowing, self.presentationAnimationGeneration == generation {
-                    // Wait one run-loop turn plus a tiny hold after the background CA animations have
-                    // committed and layout has been refreshed by the completion block.  The text then
-                    // fades in on a static layer, not during the settle frames.
-                    self.scheduleTextContentFadeIn(after: 0.045, generation: generation)
-                } else {
-                    self.cancelPendingTextFadeIn()
+                    // 文字此刻模型 opacity 仍为 0（不可见）。在淡入前先把布局落定并强制
+                    // 同步栅格化：字体度量、typographic bounds、attributed 缓存、像素对齐
+                    // 全部一次性建立。若把这份“首次渲染”留到淡入窗口内，图层内容会在
+                    // 半透明期间被重建/重排，表现为文字出现瞬间从上向下位移与闪动。
+                    self.rootView.layoutSubtreeIfNeeded()
+                    self.titleLabel.display()
+                    self.lyricLabel.display()
+                    self.textContainerView.display()
+                    // 淡入零延迟成立的前提（与上方 completion?() 的 setFrame 移除配合）：
+                    // 窗口 frame 的最后一次写入发生在动画开始前，窗口系统在 0.30s 动画窗口内
+                    // 已完成滞后布局收敛；完成回调里不再重复 setFrame，也就没有“动画结束后
+                    // 60~90ms 再弹回 1pt”的滞后布局。此刻 contentLayoutRect 读到的就是收敛
+                    // 权威值（36/y=3），layoutLabels 写入与系统一致 → 无弹回 → 无需固定 delay。
+                    // displayIfNeeded 只负责把上述布局与首帧栅格化同步到当前事务，保证淡入
+                    // 窗口（0.18s）内几何绝对静止。
+                    self.displayIfNeeded()
+                    self.animateTextContentOpacity(
+                        from: 0,
+                        to: 1,
+                        duration: 0.18,
+                        delay: 0,
+                        timingFunctionName: .easeOut
+                    )
                 }
             }
         }
@@ -1673,7 +1623,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
     }
 
 
-    private func animatePresentationIn(to targetFrame: NSRect, targetSize: NSSize, duration: TimeInterval = 0.19) {
+    private func animatePresentationIn(to targetFrame: NSRect, targetSize: NSSize, duration: TimeInterval = 0.30) {
         let wasVisuallyHidden = alphaValue < 0.05 || !isVisible
         setFrame(targetFrame, display: true)
         layoutLabels(size: targetSize)
@@ -1684,6 +1634,11 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         alphaValue = 1
 
         guard let layer = preparePresentationLayer() else { return }
+
+        // 让大陆首帧内容在动画启动前完成同步绘制并提交到图层（layoutLabels 已置 needsDisplay）。
+        // 否则窗口上屏的首帧可能拿到尚未绘制完成的图层内容，动画起步瞬间会闪一下空白。
+        continentView.displayIfNeeded()
+
         let collapsed = presentationCollapsedSize(for: targetSize)
         let collapsedState = PresentationState(
             scaleX: max(0.80, min(0.90, collapsed.width / max(targetSize.width, 1))),
@@ -1713,7 +1668,14 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         ) { [weak self] in
             guard let self else { return }
             self.setPresentationLayer(scaleX: 1.0, scaleY: 1.0, opacity: 1.0)
-            self.setFrame(targetFrame, display: true)
+            // 入场动画只作用于 layer transform，窗口 frame 自 show()/本方法入口写入后从未
+            // 改变，完成回调不再重复 setFrame —— 与退场路径（animatePresentationOut 不写
+            // frame）对齐。日志实测：同值 setFrame 仍会让窗口系统在动画结束后约 60~90ms
+            // 再触发一轮滞后布局，把容器从写入值“弹回”收敛值（37→36，1pt），弹回落在文字
+            // 淡入窗口内即表现为“从上向下位移”。去掉它就没有新的滞后布局可弹。
+            // layoutLabels 保留：此刻 frame.size 已等于目标尺寸，其内部的先 setFrame 同步
+            // 分支不会命中，只会读取动画窗口（0.30s）内早已收敛的 contentLayoutRect 做最终
+            // 对齐，写入值即系统权威值，不会引起新的弹回。
             self.layoutLabels(size: targetSize)
             self.hasShadow = false
         }

@@ -28,6 +28,8 @@ final class SelectionToolbarController {
     private var eventMonitor: Any?
     private var keyDownMonitor: Any?
     private var localClickMonitor: Any?
+    private var fullscreenObserver: NSObjectProtocol?
+    private var isFrontmostInFullScreen = false
     private var currentSettings: AppSettings
     private var mouseDownLocation: NSPoint?
     private var selectionRect: CGRect?
@@ -59,6 +61,7 @@ final class SelectionToolbarController {
 
     func stop() {
         reset(shouldHideToolbar: true, clearTarget: true)
+        removeFullscreenObserver()
         removeEventMonitor(&eventMonitor)
         removeEventMonitor(&keyDownMonitor)
         removeEventMonitor(&localClickMonitor)
@@ -69,7 +72,16 @@ final class SelectionToolbarController {
             removeEventMonitor(&eventMonitor)
             removeEventMonitor(&keyDownMonitor)
             removeEventMonitor(&localClickMonitor)
+            removeFullscreenObserver()
             return
+        }
+
+        // 全屏时隐藏开关开启：监听 Space 切换（进入/退出全屏必然切换 Space）。
+        if currentSettings.isSelectionToolbarHideInFullscreen {
+            installFullscreenObserver()
+        } else {
+            removeFullscreenObserver()
+            isFrontmostInFullScreen = false
         }
 
         // 全局鼠标：只监听其他 app 的点击/拖拽，驱动选区工具栏的显示与跨应用点击隐藏。
@@ -106,6 +118,74 @@ final class SelectionToolbarController {
     private func handleLocalClick(_ event: NSEvent) {
         guard event.windowNumber != toolbarWindow.windowNumber else { return }
         hideForExternalInput()
+    }
+
+    private func installFullscreenObserver() {
+        guard fullscreenObserver == nil else { return }
+        fullscreenObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async { self?.handleActiveSpaceDidChange() }
+        }
+    }
+
+    private func removeFullscreenObserver() {
+        guard let fullscreenObserver else { return }
+        NSWorkspace.shared.notificationCenter.removeObserver(fullscreenObserver)
+        self.fullscreenObserver = nil
+    }
+
+    /// 进入全屏（Space 切换）时前台应用已处于全屏 → 立即收起可能正显示的工具栏。
+    /// 若此刻正处于全屏窗口展示中，由后续拖选路径的展示前复查继续拦截。
+    private func handleActiveSpaceDidChange() {
+        refreshFullscreenState()
+        if isFrontmostInFullScreen {
+            reset(shouldHideToolbar: true, clearTarget: true)
+        }
+    }
+
+    private func shouldHideToolbarInFullscreen() -> Bool {
+        guard currentSettings.isSelectionToolbarHideInFullscreen else { return false }
+        refreshFullscreenState()
+        return isFrontmostInFullScreen
+    }
+
+    private func refreshFullscreenState() {
+        isFrontmostInFullScreen = Self.frontmostAppIsInFullScreen()
+    }
+
+    /// 前台应用存在铺满某块屏幕的普通层（layer 0）窗口 → 判定为全屏状态，
+    /// 此时选区工具栏不应弹出遮挡全屏内容。CGWindowBounds 与 NSScreen.frame
+    /// 均以点为单位（坐标系原点不同但尺寸可直接比较），按尺寸 ±1pt 匹配。
+    private static func frontmostAppIsInFullScreen() -> Bool {
+        guard let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              let windowInfo = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                kCGNullWindowID
+              ) as? [[String: Any]] else {
+            return false
+        }
+        let screenSizes = NSScreen.screens.map { $0.frame.size }
+        for entry in windowInfo {
+            guard let ownerPID = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.intValue,
+                  let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue,
+                  ownerPID == Int(frontmostPID),
+                  layer == 0,
+                  let bounds = entry[kCGWindowBounds as String] as? [String: Any],
+                  let width = (bounds["Width"] as? NSNumber)?.doubleValue,
+                  let height = (bounds["Height"] as? NSNumber)?.doubleValue else {
+                continue
+            }
+            let coversAScreen = screenSizes.contains {
+                abs($0.width - CGFloat(width)) <= 1 && abs($0.height - CGFloat(height)) <= 1
+            }
+            if coversAScreen {
+                return true
+            }
+        }
+        return false
     }
 
     /// 任意键盘输入或点击本 app 其他窗口 → 收起工具栏并清空选区状态。
@@ -181,6 +261,11 @@ final class SelectionToolbarController {
     private func showToolbar(near point: NSPoint) {
         pendingShow = nil
         guard isEnabled else {
+            hideToolbar()
+            return
+        }
+        // 全屏时隐藏：前台应用处于全屏时不弹出工具栏（每次展示前复查，避免长期缓存错误状态）。
+        if shouldHideToolbarInFullscreen() {
             hideToolbar()
             return
         }

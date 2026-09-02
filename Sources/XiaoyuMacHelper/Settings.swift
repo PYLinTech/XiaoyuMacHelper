@@ -155,14 +155,15 @@ struct SearchEnginePreset: Equatable {
     let title: String
     let template: String
 
+    static let defaultTemplate = "https://cn.bing.com/search?q=%s"
+
     static let all: [SearchEnginePreset] = [
         SearchEnginePreset(title: "谷歌", template: "https://www.google.com/search?q=%s"),
         SearchEnginePreset(title: "必应", template: "https://www.bing.com/search?q=%s"),
-        SearchEnginePreset(title: "必应中国", template: "https://cn.bing.com/search?q=%s"),
+        SearchEnginePreset(title: "必应中国", template: defaultTemplate),
         SearchEnginePreset(title: "百度", template: "https://www.baidu.com/s?wd=%s")
     ]
 
-    static let defaultTemplate = all[0].template
     static let customTitle = "自定义"
 
     static func presetIndex(for template: String) -> Int? {
@@ -174,6 +175,7 @@ struct AppSettings: Equatable, Sendable {
     var isCapsLockIndicatorEnabled: Bool
     var isClickToDisableEnabled: Bool
     var isSelectionToolbarEnabled: Bool
+    var isSelectionToolbarHideInFullscreen: Bool
     var isSelectionToolbarSelectAllEnabled: Bool
     var isSelectionToolbarCopyEnabled: Bool
     var isSelectionToolbarPasteEnabled: Bool
@@ -280,11 +282,12 @@ final class SettingsStore {
             selectionToolbarPasteEnabledKey: true,
             selectionToolbarSearchEnabledKey: true,
             selectionToolbarScreenshotEnabledKey: false,
+            selectionToolbarHideInFullscreenKey: true,
             selectionToolbarOrderKey: ToolbarAction.configurableCases.map(\.rawValue),
             searchURLTemplateKey: SearchEnginePreset.defaultTemplate,
             screenshotSaveDirectoryKey: defaultScreenshotDirectoryURL().path,
             screenshotCopiesToClipboardKey: true,
-            screenshotSelectsRegionKey: false,
+            screenshotSelectsRegionKey: true,
             activeVisionEnabledKey: false,
             desktopLyricsEnabledKey: false,
             desktopLyricsSurfaceEnabledKey: true,
@@ -361,6 +364,7 @@ final class SettingsStore {
             isCapsLockIndicatorEnabled: defaults.bool(forKey: capsLockIndicatorEnabledKey),
             isClickToDisableEnabled: defaults.bool(forKey: capsLockIndicatorClickToDisableEnabledKey),
             isSelectionToolbarEnabled: defaults.bool(forKey: selectionToolbarEnabledKey),
+            isSelectionToolbarHideInFullscreen: defaults.bool(forKey: selectionToolbarHideInFullscreenKey),
             isSelectionToolbarSelectAllEnabled: defaults.bool(forKey: selectionToolbarSelectAllEnabledKey),
             isSelectionToolbarCopyEnabled: defaults.bool(forKey: selectionToolbarCopyEnabledKey),
             isSelectionToolbarPasteEnabled: defaults.bool(forKey: selectionToolbarPasteEnabledKey),
@@ -421,6 +425,10 @@ final class SettingsStore {
 
     func setSelectionToolbarEnabled(_ isEnabled: Bool) {
         defaults.set(isEnabled, forKey: selectionToolbarEnabledKey)
+    }
+
+    func setSelectionToolbarHideInFullscreen(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: selectionToolbarHideInFullscreenKey)
     }
 
     func setSelectionToolbarAction(_ action: ToolbarAction, enabled isEnabled: Bool) {

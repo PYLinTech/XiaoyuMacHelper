@@ -10,6 +10,31 @@ enum AnnotationTool: Int {
     case rect
 }
 
+/// 批注线宽档位（三档）：作用于箭头杆宽与矩形描边（图像像素），只影响新绘制的元素。
+enum AnnotationThickness: Int, CaseIterable {
+    case thin
+    case medium
+    case thick
+
+    /// 落笔描边线宽（图像像素）。
+    var strokeWidth: CGFloat {
+        switch self {
+        case .thin: return 3
+        case .medium: return 6
+        case .thick: return 12
+        }
+    }
+
+    /// 界面显示名（工具栏提示 / 面板行标签）。
+    var displayName: String {
+        switch self {
+        case .thin: return "细"
+        case .medium: return "中"
+        case .thick: return "粗"
+        }
+    }
+}
+
 /// 一个批注元素：以 center/size/rotation 定义的独立个体，支持移动、缩放、旋转。
 /// 所有几何量均为「图像坐标」（左上原点、y 向下、单位 = 截图像素）；
 /// rotation 为弧度，正值 = 视觉顺时针（y 向下坐标系中 atan2 的自然方向）。
@@ -30,7 +55,7 @@ struct AnnotationElement: Equatable {
     var size: NSSize = .zero
     var rotation: CGFloat = 0          // 弧度
     var fontSize: CGFloat = 24         // 文本字号（图像像素）
-    var strokeWidth: CGFloat = 4       // rect/arrow 线宽（图像像素）
+    var strokeWidth: CGFloat = 6       // rect/arrow 线宽（图像像素）
 
     static func == (lhs: AnnotationElement, rhs: AnnotationElement) -> Bool {
         lhs.kind == rhs.kind
@@ -52,7 +77,6 @@ struct AnnotationElement: Equatable {
 @MainActor
 final class AnnotationCanvasView: NSView {
     enum Metrics {
-        static let strokeWidth: CGFloat = 4      // 箭头/矩形线宽（图像像素）
         static let textFontSize: CGFloat = 24    // 文本字号（图像像素）
         static let maxZoomScale: CGFloat = 16    // 最大放大倍数
         static let maxOutspan: CGFloat = 3       // 可见区可扩展到图像宽度的倍数（看选区外）
@@ -76,6 +100,8 @@ final class AnnotationCanvasView: NSView {
 
     var currentTool: AnnotationTool = .arrow
     var currentColor: NSColor = .systemRed
+    /// 当前线宽档位：新绘制的箭头/矩形采用；历史元素保留各自的 strokeWidth。
+    var currentThickness: AnnotationThickness = .medium
 
     var onZoomChanged: ((CGFloat) -> Void)?
     var onHistoryChanged: ((Bool, Bool) -> Void)?   // (canUndo, canRedo)
@@ -613,14 +639,14 @@ final class AnnotationCanvasView: NSView {
         switch currentTool {
         case .arrow:
             addElement(Self.makeArrow(
-                from: start, to: current, width: Metrics.strokeWidth, color: currentColor
+                from: start, to: current, width: currentThickness.strokeWidth, color: currentColor
             ))
         case .rect:
             guard abs(dx) >= 8, abs(dy) >= 8 else { return }   // 过小没有缩放意义
             var element = AnnotationElement(kind: .rect, color: currentColor)
             element.center = NSPoint(x: (start.x + current.x) / 2, y: (start.y + current.y) / 2)
             element.size = NSSize(width: abs(dx), height: abs(dy))
-            element.strokeWidth = Metrics.strokeWidth
+            element.strokeWidth = currentThickness.strokeWidth
             addElement(element)
         case .text:
             break
@@ -1508,7 +1534,7 @@ final class AnnotationCanvasView: NSView {
             drawArrow(
                 from: viewPoint(fromImage: start),
                 to: viewPoint(fromImage: end),
-                width: Metrics.strokeWidth * scale,
+                width: currentThickness.strokeWidth * scale,
                 color: color
             )
         case .rect:
@@ -1520,7 +1546,7 @@ final class AnnotationCanvasView: NSView {
             )
             color.setStroke()
             let path = NSBezierPath(rect: rectInView(frame))
-            path.lineWidth = Metrics.strokeWidth * scale
+            path.lineWidth = currentThickness.strokeWidth * scale
             path.stroke()
         case .text:
             break
@@ -2045,7 +2071,88 @@ final class AnnotationColorButton: NSButton {
     }
 }
 
-// MARK: - 批注工具栏
+/// 当前线宽的矩形按钮：自绘一条宽度随档位变化的水平短线作为"粗细"预览，
+/// 点击弹出三档选择面板；hover 提亮背景（与 AnnotationColorButton 交互同构）。
+@MainActor
+final class AnnotationThicknessButton: NSButton {
+    var currentThickness: AnnotationThickness = .medium {
+        didSet { needsDisplay = true }   // 线样在 draw(_:) 自绘，改档必须显式触发重绘
+    }
+
+    var onClick: (() -> Void)?
+
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovering = false
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+        setButtonType(.momentaryChange)
+        refusesFirstResponder = true   // 点击不抢键盘焦点（快捷键始终作用于画布）
+        title = ""
+        attributedTitle = NSAttributedString()
+        attributedAlternateTitle = NSAttributedString()
+        target = self
+        action = #selector(clicked)
+        refreshStyle()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        if let trackingAreaRef { removeTrackingArea(trackingAreaRef) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        refreshStyle()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        refreshStyle()
+    }
+
+    private func refreshStyle() {
+        // 按钮本体透明（hover 微亮），线样自绘。
+        layer?.backgroundColor = isHovering
+            ? NSColor.white.withAlphaComponent(0.14).cgColor
+            : NSColor.clear.cgColor
+    }
+
+    /// 自绘线样：固定长度的水平短线，线宽 = 当前档位线宽（圆头，亮色在毛玻璃上清晰）。
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let length: CGFloat = 18
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: (bounds.width - length) / 2, y: bounds.midY))
+        path.line(to: NSPoint(x: (bounds.width + length) / 2, y: bounds.midY))
+        path.lineWidth = currentThickness.strokeWidth
+        path.lineCapStyle = .round
+        LiquidGlassOverlayStyle.primaryTextColor().setStroke()
+        path.stroke()
+    }
+
+    @objc private func clicked() {
+        onClick?()
+    }
+}
 
 @MainActor
 final class AnnotationToolbarView: NSView {
@@ -2057,6 +2164,7 @@ final class AnnotationToolbarView: NSView {
         static let buttonWidth: CGFloat = 34 // 图标按钮统一宽度
         static let buttonHeight: CGFloat = 30
         static let colorWidth: CGFloat = 36  // 颜色色点按钮
+        static let thicknessWidth: CGFloat = 34 // 粗细预览按钮
         static let zoomButtonWidth: CGFloat = 30
         static let percentWidth: CGFloat = 48
         static let adjustButtonWidth: CGFloat = 40
@@ -2072,11 +2180,13 @@ final class AnnotationToolbarView: NSView {
     var onZoomIn: (() -> Void)?
     var onZoomOut: (() -> Void)?
     var onColorTap: (() -> Void)?
+    var onThicknessTap: (() -> Void)?
     var onAdjustSelection: (() -> Void)?
     var onExitAdjustMode: (() -> Void)?
 
     private let closeButton = AnnotationToolbarButton(icon: "xmark", fallbackTitle: "关闭")
     private let colorButton = AnnotationColorButton()
+    private let thicknessButton = AnnotationThicknessButton()
     private let textButton = AnnotationToolbarButton(icon: "textformat", fallbackTitle: "文本")
     private let arrowButton = AnnotationToolbarButton(icon: "arrow.up.right", fallbackTitle: "箭头")
     private let rectButton = AnnotationToolbarButton(icon: "rectangle", fallbackTitle: "矩形")
@@ -2104,6 +2214,10 @@ final class AnnotationToolbarView: NSView {
         didSet { colorButton.currentColor = currentColor }
     }
 
+    var currentThickness: AnnotationThickness = .medium {
+        didSet { thicknessButton.currentThickness = currentThickness }
+    }
+
     init() {
         super.init(frame: .zero)
         wantsLayer = true
@@ -2126,6 +2240,7 @@ final class AnnotationToolbarView: NSView {
 
         closeButton.toolTip = "关闭（Esc）"
         colorButton.toolTip = "批注颜色"
+        thicknessButton.toolTip = "线条粗细"
         textButton.toolTip = "文本"
         arrowButton.toolTip = "箭头"
         rectButton.toolTip = "矩形"
@@ -2138,6 +2253,7 @@ final class AnnotationToolbarView: NSView {
 
         closeButton.onClick = { [weak self] in self?.onClose?() }
         colorButton.onClick = { [weak self] in self?.onColorTap?() }
+        thicknessButton.onClick = { [weak self] in self?.onThicknessTap?() }
         textButton.onClick = { [weak self] in self?.selectTool(.text) }
         arrowButton.onClick = { [weak self] in self?.selectTool(.arrow) }
         rectButton.onClick = { [weak self] in self?.selectTool(.rect) }
@@ -2164,7 +2280,7 @@ final class AnnotationToolbarView: NSView {
         hintLabel.cell?.usesSingleLineMode = true
         hintLabel.isHidden = true
 
-        for button in [closeButton, colorButton, textButton, arrowButton, rectButton,
+        for button in [closeButton, colorButton, thicknessButton, textButton, arrowButton, rectButton,
                        undoButton, redoButton, adjustButton, zoomOutButton, zoomInButton, saveButton] {
             addSubview(button)
         }
@@ -2195,7 +2311,7 @@ final class AnnotationToolbarView: NSView {
     func setAdjustingSelection(_ adjusting: Bool) {
         isAdjustMode = adjusting
         adjustButton.isSelected = adjusting
-        for view in [closeButton, colorButton, textButton, arrowButton, rectButton,
+        for view in [closeButton, colorButton, thicknessButton, textButton, arrowButton, rectButton,
                      undoButton, redoButton, adjustButton,
                      zoomOutButton, zoomPercentLabel, zoomInButton] {
             view.isHidden = adjusting
@@ -2228,11 +2344,11 @@ final class AnnotationToolbarView: NSView {
     }
 
     /// 编辑模式内容宽度（与 layoutEditMode 的按钮顺序和间距一一对应）。
-    /// 分组：[✕] [色点] [文本 箭头 矩形] [撤销 还原] [调整选区] [− % +] [✓]
+    /// 分组：[✕] [色点 粗细] [文本 箭头 矩形] [撤销 还原] [调整选区] [− % +] [✓]
     private static func editModeWidth() -> CGFloat {
         let widths: [CGFloat] = [
             Metrics.buttonWidth,                                        // ✕
-            Metrics.colorWidth,                                         // 色点
+            Metrics.colorWidth, Metrics.thicknessWidth,                 // 色点 粗细
             Metrics.buttonWidth, Metrics.buttonWidth, Metrics.buttonWidth,  // 文本 箭头 矩形
             Metrics.buttonWidth, Metrics.buttonWidth,                   // 撤销 还原
             Metrics.adjustButtonWidth,                                  // 调整选区
@@ -2240,12 +2356,12 @@ final class AnnotationToolbarView: NSView {
             Metrics.buttonWidth                                         // ✓ 保存
         ]
         let gaps: [CGFloat] = [
-            Metrics.groupGap, Metrics.groupGap,             // ✕ | 色点 | 工具
-            Metrics.gap, Metrics.gap,                       // 工具组内
-            Metrics.groupGap, Metrics.gap,                  // 撤销还原
-            Metrics.groupGap, Metrics.groupGap,             // 调整 | 缩放
-            Metrics.gap, Metrics.gap,                       // 缩放组内
-            Metrics.groupGap                                // 保存
+            Metrics.groupGap, Metrics.gap, Metrics.groupGap,    // ✕ | 色点 粗细 | 工具
+            Metrics.gap, Metrics.gap,                           // 工具组内
+            Metrics.groupGap, Metrics.gap,                      // 撤销还原
+            Metrics.groupGap, Metrics.groupGap,                 // 调整 | 缩放
+            Metrics.gap, Metrics.gap,                           // 缩放组内
+            Metrics.groupGap                                    // 保存
         ]
         return Metrics.padding * 2 + widths.reduce(0, +) + gaps.reduce(0, +)
     }
@@ -2302,7 +2418,9 @@ final class AnnotationToolbarView: NSView {
         closeButton.frame = NSRect(x: x, y: y, width: Metrics.buttonWidth, height: Metrics.buttonHeight)
         x = closeButton.frame.maxX + Metrics.groupGap
         colorButton.frame = NSRect(x: x, y: y, width: Metrics.colorWidth, height: Metrics.buttonHeight)
-        x = colorButton.frame.maxX + Metrics.groupGap
+        x = colorButton.frame.maxX + Metrics.gap
+        thicknessButton.frame = NSRect(x: x, y: y, width: Metrics.thicknessWidth, height: Metrics.buttonHeight)
+        x = thicknessButton.frame.maxX + Metrics.groupGap
         for button in [textButton, arrowButton, rectButton] {
             button.frame = NSRect(x: x, y: y, width: Metrics.buttonWidth, height: Metrics.buttonHeight)
             x = button.frame.maxX + Metrics.gap
@@ -2443,6 +2561,174 @@ final class AnnotationColorPanel: FloatingOverlayPanel {
     }
 }
 
+// MARK: - 粗细选择面板
+
+/// 粗细选择面板的行按钮：左侧自绘该档位线样，右侧显示档位名（细/中/粗）；
+/// 悬停微亮、当前档整行高亮。
+@MainActor
+private final class AnnotationThicknessRowButton: NSButton {
+    let option: AnnotationThickness
+    var isRowSelected = false {
+        didSet { needsDisplay = true }
+    }
+    var onClick: (() -> Void)?
+
+    private var trackingAreaRef: NSTrackingArea?
+    private var isHovering = false
+
+    /// 本视图翻转为 y 向下坐标系，便于文字与图形按"顶部基准"排布。
+    override var isFlipped: Bool { true }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    init(option: AnnotationThickness) {
+        self.option = option
+        super.init(frame: .zero)
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+        setButtonType(.momentaryChange)
+        refusesFirstResponder = true
+        title = ""
+        attributedTitle = NSAttributedString()
+        attributedAlternateTitle = NSAttributedString()
+        target = self
+        action = #selector(clicked)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        if let trackingAreaRef { removeTrackingArea(trackingAreaRef) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if isRowSelected {
+            NSColor.controlAccentColor.withAlphaComponent(0.30).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        } else if isHovering {
+            NSColor.white.withAlphaComponent(0.12).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        }
+
+        // 线样：固定长度的水平短线，宽度 = 该档位线宽（圆头，亮色在毛玻璃上清晰）。
+        let sampleLength: CGFloat = 26
+        let samplePath = NSBezierPath()
+        samplePath.move(to: NSPoint(x: 14, y: bounds.midY))
+        samplePath.line(to: NSPoint(x: 14 + sampleLength, y: bounds.midY))
+        samplePath.lineWidth = option.strokeWidth
+        samplePath.lineCapStyle = .round
+        NSColor.white.withAlphaComponent(0.95).setStroke()
+        samplePath.stroke()
+
+        // 档位名（细/中/粗）。
+        let name = option.displayName as NSString
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.95)
+        ]
+        let nameSize = name.size(withAttributes: attributes)
+        name.draw(
+            at: NSPoint(x: 52, y: (bounds.height - nameSize.height) / 2),
+            withAttributes: attributes
+        )
+    }
+
+    @objc private func clicked() {
+        onClick?()
+    }
+}
+
+/// 粗细选择面板：三档（细/中/粗）行按钮纵向排列，当前档高亮；选中即回调并关闭。
+@MainActor
+final class AnnotationThicknessPanel: FloatingOverlayPanel {
+    var onThicknessSelected: ((AnnotationThickness) -> Void)?
+
+    /// 当前使用的线宽档位（打开面板时由窗口设置，用于行高亮）。
+    var selectedThickness: AnnotationThickness? {
+        didSet { refreshRowHighlight() }
+    }
+
+    private enum Metrics {
+        static let padding: CGFloat = 8
+        static let rowHeight: CGFloat = 34
+        static let rowGap: CGFloat = 4
+        static let width: CGFloat = 120
+        static var height: CGFloat {
+            padding * 2 + rowHeight * CGFloat(AnnotationThickness.allCases.count)
+                + rowGap * CGFloat(AnnotationThickness.allCases.count - 1)
+        }
+    }
+
+    private var rowButtons: [AnnotationThicknessRowButton] = []
+
+    init() {
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: Metrics.width, height: Metrics.height),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        configureFloatingOverlay()
+        level = .screenSaver
+        hasShadow = true
+
+        let background = LiquidGlassEffectView(frame: contentView?.bounds ?? .zero)
+        background.autoresizingMask = [.width, .height]
+        LiquidGlassOverlayStyle.configureGlass(background, cornerRadius: 12)
+        contentView = background
+
+        // 面板坐标 y 向上：行自顶部向下逐个排布。
+        let topY = Metrics.height - Metrics.padding - Metrics.rowHeight
+        for (index, option) in AnnotationThickness.allCases.enumerated() {
+            let row = AnnotationThicknessRowButton(option: option)
+            row.frame = NSRect(
+                x: Metrics.padding,
+                y: topY - CGFloat(index) * (Metrics.rowHeight + Metrics.rowGap),
+                width: Metrics.width - Metrics.padding * 2,
+                height: Metrics.rowHeight
+            )
+            row.toolTip = "线宽：\(option.displayName)"
+            row.onClick = { [weak self] in self?.onThicknessSelected?(option) }
+            background.addSubview(row)
+            rowButtons.append(row)
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func refreshRowHighlight() {
+        for row in rowButtons {
+            row.isRowSelected = row.option == selectedThickness
+        }
+    }
+}
+
 // MARK: - 批注全屏窗口
 
 @MainActor
@@ -2456,6 +2742,7 @@ final class ScreenshotAnnotationWindow: NSPanel {
     private let canvasView = AnnotationCanvasView()
     private let toolbarView = AnnotationToolbarView()
     private let colorPanel = AnnotationColorPanel()
+    private let thicknessPanel = AnnotationThicknessPanel()
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -2514,6 +2801,7 @@ final class ScreenshotAnnotationWindow: NSPanel {
         canvasView.configure(image: image, selection: selection)
         toolbarView.currentTool = canvasView.currentTool
         toolbarView.currentColor = canvasView.currentColor
+        toolbarView.currentThickness = canvasView.currentThickness
         toolbarView.setAdjustingSelection(false)   // 复用窗口时确保从编辑模式开始
 
         toolbarView.onClose = { [weak self] in
@@ -2533,9 +2821,11 @@ final class ScreenshotAnnotationWindow: NSPanel {
         toolbarView.onZoomIn = { [weak self] in self?.canvasView.zoom(by: 1.25) }
         toolbarView.onZoomOut = { [weak self] in self?.canvasView.zoom(by: 0.8) }
         toolbarView.onColorTap = { [weak self] in self?.toggleColorPanel() }
+        toolbarView.onThicknessTap = { [weak self] in self?.toggleThicknessPanel() }
         toolbarView.onAdjustSelection = { [weak self] in
             guard let self else { return }
             self.colorPanel.orderOut(nil)
+            self.thicknessPanel.orderOut(nil)
             self.canvasView.beginAdjustingSelection()
         }
         toolbarView.onExitAdjustMode = { [weak self] in
@@ -2555,13 +2845,21 @@ final class ScreenshotAnnotationWindow: NSPanel {
             onCancel()
         }
         canvasView.onInteraction = { [weak self] in
-            self?.colorPanel.orderOut(nil)
+            guard let self else { return }
+            self.colorPanel.orderOut(nil)
+            self.thicknessPanel.orderOut(nil)
         }
         colorPanel.onColorSelected = { [weak self] color in
             guard let self else { return }
             self.canvasView.currentColor = color
             self.toolbarView.currentColor = color
             self.colorPanel.orderOut(nil)
+        }
+        thicknessPanel.onThicknessSelected = { [weak self] thickness in
+            guard let self else { return }
+            self.canvasView.currentThickness = thickness
+            self.toolbarView.currentThickness = thickness
+            self.thicknessPanel.orderOut(nil)
         }
 
         // 全局热键截图时本 App 往往不在前台：不显式激活，首次点击会被「激活窗口」
@@ -2578,6 +2876,7 @@ final class ScreenshotAnnotationWindow: NSPanel {
             colorPanel.orderOut(nil)
             return
         }
+        thicknessPanel.orderOut(nil)
         guard let colorButton = toolbarView.subviews.first(where: { $0 is AnnotationColorButton }) else {
             return
         }
@@ -2588,9 +2887,46 @@ final class ScreenshotAnnotationWindow: NSPanel {
         colorPanel.show(at: NSPoint(x: rectInScreen.midX, y: rectInScreen.maxY))
     }
 
+    private func toggleThicknessPanel() {
+        if thicknessPanel.isVisible {
+            thicknessPanel.orderOut(nil)
+            return
+        }
+        colorPanel.orderOut(nil)
+        guard let thicknessButton = toolbarView.subviews.first(where: { $0 is AnnotationThicknessButton }) else {
+            return
+        }
+        let rectInToolbar = thicknessButton.convert(thicknessButton.bounds, to: toolbarView)
+        let rectInWindow = toolbarView.convert(rectInToolbar, to: nil)
+        let rectInScreen = convertToScreen(rectInWindow)
+        thicknessPanel.selectedThickness = canvasView.currentThickness   // 打开时同步当前档位高亮
+        thicknessPanel.show(at: NSPoint(x: rectInScreen.midX, y: rectInScreen.maxY))
+    }
+
     override func orderOut(_ sender: Any?) {
         colorPanel.orderOut(nil)
+        thicknessPanel.orderOut(nil)
         super.orderOut(sender)
+    }
+}
+
+extension AnnotationThicknessPanel {
+    func show(at point: NSPoint) {
+        let screenFrame = screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        // 水平居中于按钮，clamp 到屏幕内（同色板）；垂直优先置于按钮上方，
+        // 上方放不下（如工具栏贴近屏顶）则翻转到下方。
+        let x = min(
+            max(point.x - frame.width / 2, screenFrame.minX + 8),
+            screenFrame.maxX - frame.width - 8
+        )
+        let aboveY = point.y + 6
+        let y = aboveY + frame.height <= screenFrame.maxY
+            ? aboveY
+            : point.y - 6 - frame.height
+        setFrameOrigin(NSPoint(x: x, y: y))
+        orderFrontRegardless()
     }
 }
 

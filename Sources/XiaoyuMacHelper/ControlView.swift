@@ -64,6 +64,9 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let activeVisionCheckbox = NSButton(checkboxWithTitle: "主动视觉感知", target: nil, action: nil)
     private let desktopLyricsCheckbox = NSButton(checkboxWithTitle: "音乐歌词", target: nil, action: nil)
     private let clickToDisableCheckbox = NSButton(checkboxWithTitle: "点击指示器取消大写", target: nil, action: nil)
+    private let selectionToolbarSettingTitle = NSTextField(labelWithString: "设置")
+    private let selectionToolbarHideInFullscreenCheckbox = NSButton(checkboxWithTitle: "全屏时隐藏选区工具栏", target: nil, action: nil)
+    private let selectionToolbarOrderTitle = NSTextField(labelWithString: "按钮顺序（拖动右侧手柄可排序）")
     private let capsLockSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let selectionToolbarSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let activeVisionSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
@@ -166,6 +169,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     var onCapsLockIndicatorChanged: ((Bool) -> Void)?
     var onClickToDisableChanged: ((Bool) -> Void)?
     var onSelectionToolbarChanged: ((Bool) -> Void)?
+    var onSelectionToolbarHideInFullscreenChanged: ((Bool) -> Void)?
     var onActiveVisionChanged: ((Bool) -> Void)?
     var onDesktopLyricsChanged: ((Bool) -> Void)?
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
@@ -236,6 +240,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         accessibilityCheckbox.state = isAccessibilityEnabled ? .on : .off
         capsLockCheckbox.state = settings.isCapsLockIndicatorEnabled ? .on : .off
         selectionToolbarCheckbox.state = settings.isSelectionToolbarEnabled ? .on : .off
+        selectionToolbarHideInFullscreenCheckbox.state = settings.isSelectionToolbarHideInFullscreen ? .on : .off
         activeVisionCheckbox.state = settings.isActiveVisionEnabled ? .on : .off
         desktopLyricsCheckbox.state = settings.isDesktopLyricsEnabled ? .on : .off
         clickToDisableCheckbox.state = settings.isClickToDisableEnabled ? .on : .off
@@ -305,6 +310,14 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         configureCheckbox(activeVisionCheckbox, size: 14, weight: .medium, action: #selector(activeVisionCheckboxChanged))
         configureCheckbox(desktopLyricsCheckbox, size: 14, weight: .medium, action: #selector(desktopLyricsCheckboxChanged))
         configureCheckbox(clickToDisableCheckbox, size: 14, weight: .regular, action: #selector(clickToDisableCheckboxChanged), in: settingsContentView)
+        configureCheckbox(selectionToolbarHideInFullscreenCheckbox, size: 14, weight: .regular, action: #selector(selectionToolbarHideInFullscreenChanged), in: settingsContentView)
+
+        [selectionToolbarSettingTitle, selectionToolbarOrderTitle].forEach {
+            $0.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+            $0.textColor = .secondaryLabelColor
+        }
+        settingsContentView.addSubview(selectionToolbarSettingTitle)
+        settingsContentView.addSubview(selectionToolbarOrderTitle)
 
         [capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, backButton].forEach { addSubview($0) }
         capsLockSettingsButton.onClick = { [weak self] in self?.showCapsLockSettingsPage() }
@@ -570,6 +583,10 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
     @objc private func selectionToolbarCheckboxChanged() {
         onSelectionToolbarChanged?(selectionToolbarCheckbox.state == .on)
+    }
+
+    @objc private func selectionToolbarHideInFullscreenChanged() {
+        onSelectionToolbarHideInFullscreenChanged?(selectionToolbarHideInFullscreenCheckbox.state == .on)
     }
 
     @objc private func activeVisionCheckboxChanged() {
@@ -1058,18 +1075,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
                 y: settingsContentHeight - Metrics.sectionInset - clickToDisableCheckbox.frame.height
             )
         case .selectionToolbarSettings:
-            layoutSettingsBase(title: "选区工具栏")
-            let rows = selectionToolbarOrder.map { row(for: $0) }
-            prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + Metrics.rowHeight * CGFloat(rows.count))
-            for (index, row) in rows.enumerated() {
-                row.isHidden = false
-                row.frame = NSRect(
-                    x: Metrics.sectionInset,
-                    y: settingsContentHeight - Metrics.sectionInset - Metrics.rowHeight - CGFloat(index) * Metrics.rowHeight,
-                    width: settingsContentWidth,
-                    height: Metrics.rowHeight
-                )
-            }
+            layoutSelectionToolbarSettingsPage()
         case .activeVisionSettings:
             layoutActiveVisionSettingsPage()
         case .desktopLyricsSettings:
@@ -1218,6 +1224,55 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         case .paste: return pasteRow
         case .search: return searchRow
         case .screenshot: return screenshotRow
+        }
+    }
+
+    private func layoutSelectionToolbarSettingsPage() {
+        layoutSettingsBase(title: "选区工具栏")
+        let rows = selectionToolbarOrder.map { row(for: $0) }
+        show(selectionToolbarSettingTitle, selectionToolbarHideInFullscreenCheckbox, selectionToolbarOrderTitle)
+        rows.forEach { show($0) }
+
+        // 面板分上下两区：上方为设置项目（标题 + checkbox），下方为可排序按钮列表
+        // （下区标题 + rows）。Cocoa 坐标系 y 向上为正，origin.y 是视图底部 y；从
+        // 上往下累减 topY 可避免 maxY/minY 误用导致元素重叠。
+        let gapUpper: CGFloat = 8      // setting 标题与 checkbox 间距
+        let gapBetween: CGFloat = 24   // 上区 checkbox 与下区标题间距
+        let gapLower: CGFloat = 8      // 下区标题与 rows 间距
+        selectionToolbarSettingTitle.sizeToFit()
+        selectionToolbarHideInFullscreenCheckbox.sizeToFit()
+        selectionToolbarOrderTitle.sizeToFit()
+        let titleH = selectionToolbarSettingTitle.frame.height
+        let checkboxH = selectionToolbarHideInFullscreenCheckbox.frame.height
+        let orderTitleH = selectionToolbarOrderTitle.frame.height
+        let upperBlockHeight = titleH + gapUpper + checkboxH + gapBetween + orderTitleH + gapLower
+        prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + upperBlockHeight + Metrics.rowHeight * CGFloat(rows.count))
+
+        let contentX = Metrics.sectionInset
+        let contentWidth = settingsContentWidth
+        var topY = settingsContentHeight - Metrics.sectionInset
+
+        // 1. setting 标题
+        topY -= titleH
+        selectionToolbarSettingTitle.frame.origin = NSPoint(x: contentX + 2, y: topY)
+
+        // 2. 间距 8 → checkbox
+        topY -= gapUpper + checkboxH
+        selectionToolbarHideInFullscreenCheckbox.frame.origin = NSPoint(x: contentX, y: topY)
+
+        // 3. 间距 24 → order 标题
+        topY -= gapBetween + orderTitleH
+        selectionToolbarOrderTitle.frame.origin = NSPoint(x: contentX + 2, y: topY)
+
+        // 4. 间距 8 → rows
+        topY -= gapLower
+        for (index, row) in rows.enumerated() {
+            row.frame = NSRect(
+                x: contentX,
+                y: topY - Metrics.rowHeight - CGFloat(index) * Metrics.rowHeight,
+                width: contentWidth,
+                height: Metrics.rowHeight
+            )
         }
     }
 
@@ -1735,6 +1790,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private lazy var allControls: [NSView] = [
         titleLabel, versionLabel, checkUpdateButton, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard, settingsScrollView,
         loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, clickToDisableCheckbox,
+        selectionToolbarSettingTitle, selectionToolbarHideInFullscreenCheckbox, selectionToolbarOrderTitle,
         capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, backButton,
         loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, selectAllRow, copyRow, pasteRow, searchRow, screenshotRow,
         appleMusicSourceRow, qqMusicSourceRow, neteaseSourceRow, searchEnginePopup, searchTemplateField, screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox,

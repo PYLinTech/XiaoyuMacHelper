@@ -11,9 +11,9 @@ final class DesktopLyricsWindow: FloatingOverlayPanel {
         static let bottomInset: CGFloat = 128
     }
 
-    // 与灵动大陆的显示/隐藏动画时长对齐（animatePresentationIn 默认 0.19s，hide 收缩 0.105s）。
+    // 与灵动大陆的显示/隐藏动画时长对齐（animatePresentationIn 默认 0.30s，hide 收缩 0.105s）。
     // 两个表面必须同速切换，否则一个在动画、一个在硬切，切换瞬间歌词会明显闪烁。
-    private static let showFadeDuration: TimeInterval = 0.19
+    private static let showFadeDuration: TimeInterval = 0.30
     private static let hideFadeDuration: TimeInterval = 0.105
 
     private let lyricsView = DesktopLyricsView()

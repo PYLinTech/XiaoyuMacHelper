@@ -59,6 +59,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.onCapsLockIndicatorChanged = { [weak self] isEnabled in self?.setCapsLockIndicatorEnabled(isEnabled) }
         controlWindow.onClickToDisableChanged = { [weak self] isEnabled in self?.setClickToDisableEnabled(isEnabled) }
         controlWindow.onSelectionToolbarChanged = { [weak self] isEnabled in self?.setSelectionToolbarEnabled(isEnabled) }
+        controlWindow.onSelectionToolbarHideInFullscreenChanged = { [weak self] isEnabled in self?.setSelectionToolbarHideInFullscreen(isEnabled) }
         controlWindow.onActiveVisionChanged = { [weak self] isEnabled in self?.setActiveVisionEnabled(isEnabled) }
         controlWindow.onDesktopLyricsChanged = { [weak self] isEnabled in self?.setDesktopLyricsEnabled(isEnabled) }
         controlWindow.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.setSelectionToolbarAction(action, enabled: isEnabled) }
@@ -430,6 +431,12 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
         settingsStore.setSelectionToolbarEnabled(isEnabled)
         currentSettings.isSelectionToolbarEnabled = isEnabled
+        refreshSelectionToolbarSettings()
+    }
+
+    private func setSelectionToolbarHideInFullscreen(_ isEnabled: Bool) {
+        settingsStore.setSelectionToolbarHideInFullscreen(isEnabled)
+        currentSettings.isSelectionToolbarHideInFullscreen = isEnabled
         refreshSelectionToolbarSettings()
     }
 
