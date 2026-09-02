@@ -30,6 +30,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private var appleMusicTokenLoginWindow: AppleMusicTokenLoginWindow?
     private var lastRenderedControlState: ControlState?
     private var previousCapsLockState: Bool?
+    private var isUpdateCheckInProgress = false
 
     init(instanceLock: SingleInstanceLock, launchMode: LaunchMode) {
         self.instanceLock = instanceLock
@@ -49,6 +50,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         if launchMode.showsControlWindowOnLaunch {
             showControlWindow()
         }
+        scheduleAutoUpdateCheck()
     }
 
     private func bindCallbacks() {
@@ -108,12 +110,115 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.onHidden = { [weak self] in self?.stopStatusPolling() }
         controlWindow.onClearDataAndQuit = { [weak self] in self?.clearDataAndQuit() }
         controlWindow.onQuit = { NSApp.terminate(nil) }
+        controlWindow.onCheckUpdateRequested = { [weak self] in self?.checkForUpdates(userInitiated: true) }
         desktopLyricsController.onPositionChanged = { [weak self] origin in self?.setDesktopLyricsPosition(origin) }
     }
 
     private func clearDataAndQuit() {
         settingsStore.clearPersistentData()
         NSApp.terminate(nil)
+    }
+
+    // MARK: - 自更新
+
+    /// 启动时自动检查（24 小时节流；失败不记账，下次启动重试）。
+    private func scheduleAutoUpdateCheck() {
+        let defaults = UserDefaults.standard
+        if let lastCheck = defaults.object(forKey: lastUpdateCheckDateKey) as? Date,
+           Date().timeIntervalSince(lastCheck) < updateCheckInterval {
+            return
+        }
+        Task { @MainActor [weak self] in
+            self?.checkForUpdates(userInitiated: false)
+        }
+    }
+
+    private func checkForUpdates(userInitiated: Bool) {
+        guard !isUpdateCheckInProgress else { return }
+        isUpdateCheckInProgress = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performUpdateCheck(userInitiated: userInitiated)
+            self.isUpdateCheckInProgress = false
+        }
+    }
+
+    private func performUpdateCheck(userInitiated: Bool) async {
+        let payload: UpdatePayload
+        do {
+            payload = try await UpdateChecker.checkLatest()
+        } catch {
+            presentUpdateFailure(pageURL: UpdateChannel.fallbackReleaseURL, reason: error.localizedDescription)
+            return
+        }
+        UserDefaults.standard.set(Date(), forKey: lastUpdateCheckDateKey)
+
+        guard let remote = payload.latestVersion,
+              let local = UpdateChecker.localVersion,
+              remote > local
+        else {
+            if userInitiated {
+                AlertPresenter.show(
+                    title: "已是最新版本",
+                    message: "当前 v\(UpdateChecker.localVersion?.description ?? "") 已是最新版本。"
+                )
+            }
+            return
+        }
+
+        let notes = payload.body.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        let message = [
+            notes,
+            "当前版本 v\(local)，发现新版本 v\(remote)。是否立即下载并更新？"
+        ]
+        .compactMap { $0 }
+        .joined(separator: "\n\n")
+
+        let shouldUpdate = AlertPresenter.show(
+            title: "发现新版本 v\(remote)",
+            message: message,
+            buttons: ["立即更新", "稍后"]
+        ) == .alertFirstButtonReturn
+        guard shouldUpdate else { return }
+        await installUpdate(payload: payload)
+    }
+
+    /// 下载 → 解包 → 三层校验 → 拉起更新辅助进程 → 退出本进程。
+    private func installUpdate(payload: UpdatePayload) async {
+        let result = await Task.detached(priority: .userInitiated) {
+            do {
+                guard let assetURL = payload.primaryAssetURL else { throw UpdateError.invalidPayload }
+                let dmgURL = try await UpdateInstaller.download(assetURL: assetURL)
+                let stagedApp = try UpdateInstaller.extractApp(fromDMG: dmgURL)
+                let targetApp = Bundle.main.bundleURL
+                guard UpdateInstaller.verify(newApp: stagedApp, targetApp: targetApp) else {
+                    throw UpdateError.verificationFailed
+                }
+                try UpdateInstaller.launchUpdater(newApp: stagedApp, targetApp: targetApp)
+                return Result<Void, UpdateError>.success(())
+            } catch let error as UpdateError {
+                return .failure(error)
+            } catch {
+                return .failure(.downloadFailed)
+            }
+        }.value
+
+        switch result {
+        case .success:
+            NSApp.terminate(nil)
+        case let .failure(error):
+            presentUpdateFailure(pageURL: payload.fallbackHTMLURL, reason: error.localizedDescription)
+        }
+    }
+
+    /// 失败兜底：打开下载页 + 提示手动下载覆盖。
+    private func presentUpdateFailure(pageURL: URL, reason: String) {
+        NSWorkspace.shared.open(pageURL)
+        AlertPresenter.show(
+            title: "自更新失败",
+            message: "\(reason)\n\n已为你打开下载页面，建议手动下载后覆盖安装。",
+            style: .warning
+        )
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

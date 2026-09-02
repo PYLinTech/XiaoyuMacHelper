@@ -46,6 +46,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let glassContentView = NSView()
     private let titleLabel = NSTextField(labelWithString: "Xiaoyu MacHelper")
     private let versionLabel = NSTextField(labelWithString: "")
+    private let checkUpdateButton = NSButton(title: "检查更新", target: nil, action: nil)
     private let toolOptionsTitle = NSTextField(labelWithString: "工具选项")
     private let moduleTitle = NSTextField(labelWithString: "功能模块")
     private let settingsTitle = NSTextField(labelWithString: "")
@@ -214,6 +215,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     var onAccessibilityGuide: (() -> Void)?
     var onClearDataAndQuit: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onCheckUpdateRequested: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -324,6 +326,13 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         clearDataAndQuitButton.action = #selector(clearDataAndQuitClicked)
         quitButton.target = self
         quitButton.action = #selector(quitClicked)
+
+        checkUpdateButton.bezelStyle = .liquidGlass
+        checkUpdateButton.controlSize = .small
+        checkUpdateButton.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        checkUpdateButton.target = self
+        checkUpdateButton.action = #selector(checkUpdateClicked)
+        addSubview(checkUpdateButton)
 
         [selectAllRow, copyRow, pasteRow, searchRow, screenshotRow].forEach { row in
             row.onToggle = { [weak self] action, isEnabled in self?.onSelectionToolbarActionChanged?(action, isEnabled) }
@@ -595,6 +604,10 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
     @objc private func quitClicked() {
         onQuit?()
+    }
+
+    @objc private func checkUpdateClicked() {
+        onCheckUpdateRequested?()
     }
 
     @objc private func backButtonClicked() {
@@ -1094,7 +1107,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
         hideAllControls()
         show(
-            titleLabel, versionLabel, toolOptionsTitle, toolOptionsCard, loginItemCheckbox, accessibilityCheckbox,
+            titleLabel, versionLabel, checkUpdateButton, toolOptionsTitle, toolOptionsCard, loginItemCheckbox, accessibilityCheckbox,
             moduleTitle, moduleCard, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox,
             capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, loginItemButton, accessibilityButton,
             clearDataAndQuitButton, quitButton
@@ -1108,9 +1121,19 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
         versionLabel.stringValue = Self.appVersionDisplayString()
         versionLabel.sizeToFit()
-        let versionX = min(titleLabel.frame.maxX + 10, contentX + contentWidth - versionLabel.frame.width)
+
+        let checkButtonWidth: CGFloat = 72
+        let checkButtonHeight: CGFloat = 24
+        checkUpdateButton.frame = NSRect(
+            x: width - Metrics.outerPadding - checkButtonWidth,
+            y: titleLabel.frame.midY - checkButtonHeight / 2,
+            width: checkButtonWidth,
+            height: checkButtonHeight
+        )
+        let versionMaxX = checkUpdateButton.frame.minX - 8
+        let versionX = min(titleLabel.frame.maxX + 10, versionMaxX - versionLabel.frame.width)
         versionLabel.frame.origin = NSPoint(
-            x: versionX,
+            x: max(contentX, versionX),
             y: titleLabel.frame.midY - versionLabel.frame.height / 2 - 0.5
         )
 
@@ -1710,7 +1733,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     }
 
     private lazy var allControls: [NSView] = [
-        titleLabel, versionLabel, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard, settingsScrollView,
+        titleLabel, versionLabel, checkUpdateButton, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard, settingsScrollView,
         loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, clickToDisableCheckbox,
         capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, backButton,
         loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, selectAllRow, copyRow, pasteRow, searchRow, screenshotRow,

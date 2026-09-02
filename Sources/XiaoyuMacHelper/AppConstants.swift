@@ -56,6 +56,15 @@ let activeVisionNotifyWhenExtendingDisplaySleepKey = "ActiveVisionNotifyWhenExte
 let activeVisionLeadTimeBeforeDisplaySleep: TimeInterval = 30
 let selectionToolbarDefaultOffMigrationKey = "SelectionToolbarDefaultOffMigrationDone"
 
+// 自更新
+let updatePerformFlag = "--perform-update"
+let updateQueryURLString = "https://api.pylin.cn/release"
+let updateRepo = "PYLinTech/XiaoyuMacHelper"
+let updateRootDirectoryName = "XiaoyuMacHelper"
+let updatesDirectoryName = "Updates"
+let lastUpdateCheckDateKey = "LastUpdateCheckDate"
+let updateCheckInterval: TimeInterval = 24 * 60 * 60
+
 func defaultScreenshotDirectoryURL() -> URL {
     FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
         ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Desktop")

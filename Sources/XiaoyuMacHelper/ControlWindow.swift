@@ -59,6 +59,7 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
     var onHidden: (() -> Void)?
     var onClearDataAndQuit: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onCheckUpdateRequested: (() -> Void)?
 
     init() {
         super.init(
@@ -134,6 +135,7 @@ final class ControlWindow: NSWindow, NSWindowDelegate {
         controlView.onAccessibilityGuide = { [weak self] in self?.onAccessibilityGuide?() }
         controlView.onClearDataAndQuit = { [weak self] in self?.onClearDataAndQuit?() }
         controlView.onQuit = { [weak self] in self?.onQuit?() }
+        controlView.onCheckUpdateRequested = { [weak self] in self?.onCheckUpdateRequested?() }
     }
 
     func show() {

@@ -7,7 +7,7 @@ APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
 RELEASE_DIR="$ROOT_DIR/release"
 STAGING_DIR="$ROOT_DIR/.release-staging"
 
-DEFAULT_APP_VERSION="${APP_VERSION:-1.0}"
+DEFAULT_APP_VERSION="${APP_VERSION:-1.0.0}"
 DEFAULT_APP_BUILD="${APP_BUILD:-$(date +%y%m%d%H%M)}"
 
 if [[ $# -ge 1 ]]; then
@@ -30,8 +30,8 @@ else
   APP_BUILD="$DEFAULT_APP_BUILD"
 fi
 
-if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
-  echo "Error: 版本号格式不正确，示例：1.0、1.0.1、2.0" >&2
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Error: 版本号必须为 x.y.z 三位格式，示例：1.1.3、2.0.1" >&2
   exit 1
 fi
 
@@ -41,6 +41,10 @@ if [[ ! "$APP_BUILD" =~ ^[0-9]+$ ]]; then
 fi
 
 export APP_VERSION APP_BUILD
+# 代码签名身份：默认用本地自签名证书 PYLinTech（由 build.sh 消费），
+# 保证打包的 DMG 签名身份稳定、TCC 权限跨版本不丢。
+# 正式对外分发时，下方可选步骤会用 DEVELOPER_ID_APPLICATION 覆盖重签。
+export CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-PYLinTech}"
 echo "Release version: $APP_VERSION ($APP_BUILD)"
 
 # Release 构建复用 build.sh，避免重复维护编译和 .app 组装逻辑。

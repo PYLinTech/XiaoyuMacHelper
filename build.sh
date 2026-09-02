@@ -5,6 +5,10 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="XiaoyuMacHelper"
 APP_VERSION="${APP_VERSION:-1.0}"
 APP_BUILD="${APP_BUILD:-1}"
+# 代码签名身份：默认用本地自签名证书 PYLinTech（见 PYLinTech-Codesigning/load-cert.sh）。
+# 固定签名身份可保证 TCC 隐私权限与登录项在每次重建后都不丢失。
+# 正式对外分发时可传 CODESIGN_IDENTITY 覆盖为 Developer ID 证书。
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-PYLinTech}"
 BUILD_DIR="$ROOT_DIR/.build/release"
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -58,7 +62,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP_DIR"
+codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_DIR"
 echo "Built: $APP_DIR"
 
 if [[ "${SKIP_OPEN:-0}" != "1" ]]; then
