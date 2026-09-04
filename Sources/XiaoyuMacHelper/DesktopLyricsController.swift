@@ -33,7 +33,6 @@ final class DesktopLyricsController {
         return resolvingTrackKey == currentTrackKey
     }
     private var currentTrackKey: String?
-    private var currentProviderName: String?
     private var currentLines: [DesktopLyricLine] = []
     private var presentationTrackKey: String?
     private var presentationElapsedAtSync: TimeInterval = 0
@@ -46,7 +45,9 @@ final class DesktopLyricsController {
     private var stableLineSwitchedAt: CFTimeInterval = CACurrentMediaTime()
     private var lastRenderedLineContext: RenderedLineContext?
     private var pausedRenderedLineContext: RenderedLineContext?
+    /// 歌词搜索结果缓存：超上限时按插入序整批清空（曲目集远小于上限，命中不受影响）。
     private var cachedLyrics: [String: DesktopLyricsSearchResult] = [:]
+    private static let cachedLyricsLimit = 200
     private var searchService: DesktopLyricsSearchService
     var onPositionChanged: ((NSPoint) -> Void)?
 
@@ -95,7 +96,6 @@ final class DesktopLyricsController {
             searchService = DesktopLyricsSearchService(settings: settings)
             cachedLyrics.removeAll()
             currentTrackKey = nil
-            currentProviderName = nil
             currentLines = []
             resetPresentationState()
         }
@@ -114,43 +114,45 @@ final class DesktopLyricsController {
                 await self?.pollNowPlaying()
             }
         }
-        timer.tolerance = 0.008
+        timer.tolerance = 0.025
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
         timer.fire()
     }
 
+    /// 轮询早退的统一清理：取消歌词解析、清空曲目态并隐藏全部形态。
+    private func resetToIdle() {
+        cancelLyricsResolve()
+        currentTrackKey = nil
+        currentLines = []
+        resetPresentationState()
+        hideAllSurfaces()
+    }
+
     private func pollNowPlaying() async {
         guard settings.isDesktopLyricsEnabled else {
-            cancelLyricsResolve()
-            resetPresentationState()
-            hideAllSurfaces()
+            resetToIdle()
+            return
+        }
+        // 三个形态全关时无任何可见输出：跳过 now-playing 查询（含每 0.25s 一次的
+        // osascript 子进程），轮询定时器保留，任一形态重新开启即恢复。
+        guard hasAnyEnabledSurface else {
+            resetToIdle()
             return
         }
         guard let track = await DesktopLyricsNowPlayingProvider.currentTrack() else {
-            cancelLyricsResolve()
-            currentTrackKey = nil
-            currentProviderName = nil
-            currentLines = []
-            resetPresentationState()
-            hideAllSurfaces()
+            resetToIdle()
             return
         }
 
         guard track.isValidForLyrics,
               isAllowedByWhitelist(appName: track.appName, bundleIdentifier: track.appBundleIdentifier) else {
-            cancelLyricsResolve()
-            currentTrackKey = nil
-            currentProviderName = nil
-            currentLines = []
-            resetPresentationState()
-            hideAllSurfaces()
+            resetToIdle()
             return
         }
 
         if track.cacheKey != currentTrackKey {
             currentTrackKey = track.cacheKey
-            currentProviderName = nil
             currentLines = []
             resetPresentationState()
             show(primary: "正在搜索歌词：\(track.displayTitle)", translation: nil, trackTitle: track.displayTitle, islandPrimary: "正在搜索歌词", isPlaying: track.isPlaying)
@@ -452,7 +454,8 @@ final class DesktopLyricsController {
         // Placeholders intentionally own long silence. Do not preview a real lyric through a
         // leading/interlude placeholder, otherwise the old “blank intro shows lyrics too early”
         // problem comes back.
-        guard !isSilencePlaceholderText(previous.text), !isSilencePlaceholderText(next.text) else {
+        guard !DesktopLyricsParser.isSilencePlaceholderText(previous.text),
+              !DesktopLyricsParser.isSilencePlaceholderText(next.text) else {
             return nextStart
         }
 
@@ -485,15 +488,6 @@ final class DesktopLyricsController {
         if index + 1 < lines.count { return lines[index + 1].time }
         return trackDuration
     }
-
-    private func isSilencePlaceholderText(_ text: String) -> Bool {
-        let compact = text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: " ", with: "")
-        guard !compact.isEmpty else { return false }
-        return compact.allSatisfy { $0 == "." || $0 == "…" || $0 == "⋯" }
-    }
-
 
     private func show(rendered context: RenderedLineContext, isPlaying: Bool) {
         show(
@@ -582,12 +576,19 @@ final class DesktopLyricsController {
         menuBarSurface.hide()
     }
 
+    /// 任一歌词形态（桌面悬浮窗 / 灵动大陆 / 菜单栏）开启即有可见输出。
+    private var hasAnyEnabledSurface: Bool {
+        settings.isDesktopLyricsSurfaceEnabled
+            || settings.isDynamicIslandLyricsEnabled
+            || settings.isMenuBarLyricsEnabled
+    }
+
     private func isAllowedByWhitelist(appName: String, bundleIdentifier: String) -> Bool {
         let normalizedAppName = appName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let normalizedBundleIdentifier = bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalizedBundleIdentifier.isEmpty || !normalizedAppName.isEmpty else { return false }
         let rawWhitelist = settings.musicLyricsAppWhitelist.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard rawWhitelist != "__empty__" else { return false }
+        guard rawWhitelist != musicLyricsAppWhitelistEmptySentinel else { return false }
 
         if rawWhitelist.isEmpty {
             let value = "\(normalizedAppName) \(normalizedBundleIdentifier)"
@@ -639,13 +640,14 @@ final class DesktopLyricsController {
         lyricsResolveTask = nil
 
         guard let result else {
-            currentProviderName = nil
             currentLines = []
             return
         }
 
+        if cachedLyrics.count >= Self.cachedLyricsLimit {
+            cachedLyrics.removeAll()
+        }
         cachedLyrics[trackKey] = result
-        currentProviderName = result.providerName
         currentLines = result.lines
     }
 

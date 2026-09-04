@@ -12,22 +12,20 @@ final class SystemAudioSpectrumMonitor: NSObject {
     var onCaptureStateChanged: (@MainActor (Bool) -> Void)?
 
     private var stream: SCStream?
-    private var output: AudioOutput?
     private var isStarting = false
     private var isRunning = false
+    /// 仅在状态翻转时回调，避免未授权路径被 0.1s 轮询反复触发（每秒 10 次全量重绘下游视图）。
+    private var lastReportedCaptureState: Bool?
 
-    static func hasCapturePermission() -> Bool {
-        CGPreflightScreenCaptureAccess()
-    }
-
-    @discardableResult
-    static func requestCapturePermission() -> Bool {
-        CGRequestScreenCaptureAccess()
+    private func reportCaptureState(_ state: Bool) {
+        guard lastReportedCaptureState != state else { return }
+        lastReportedCaptureState = state
+        onCaptureStateChanged?(state)
     }
 
     func start() {
-        guard Self.hasCapturePermission() else {
-            onCaptureStateChanged?(false)
+        guard ScreenRecordingPermission.isAuthorized else {
+            reportCaptureState(false)
             return
         }
         guard !isStarting, !isRunning else { return }
@@ -41,10 +39,9 @@ final class SystemAudioSpectrumMonitor: NSObject {
         guard isStarting || isRunning || stream != nil else { return }
         isStarting = false
         isRunning = false
-        onCaptureStateChanged?(false)
+        reportCaptureState(false)
         let streamToStop = stream
         stream = nil
-        output = nil
         Task {
             try? await streamToStop?.stopCapture()
         }
@@ -58,7 +55,9 @@ final class SystemAudioSpectrumMonitor: NSObject {
                 return
             }
 
-            let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+            // 使用 excludingWindows 空列表构造全捕获 filter：空应用列表的旧构造
+            // 存在流启动失败的社区报告，语义等价但路径更稳。
+            let filter = SCContentFilter(display: display, excludingWindows: [])
             let configuration = SCStreamConfiguration()
             configuration.width = 2
             configuration.height = 2
@@ -70,13 +69,13 @@ final class SystemAudioSpectrumMonitor: NSObject {
             configuration.channelCount = 2
 
             let audioQueue = DispatchQueue(label: "local.xiaoyu-mac-helper.system-audio-spectrum", qos: .userInteractive)
-            let audioOutput = AudioOutput(bandCount: 7) { [weak self] levels in
+            let audioOutput = AudioOutput { [weak self] levels in
                 Task { @MainActor [weak self] in
                     self?.onLevels?(levels)
                 }
             }
 
-            let newStream = SCStream(filter: filter, configuration: configuration, delegate: nil)
+            let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try newStream.addStreamOutput(audioOutput, type: .audio, sampleHandlerQueue: audioQueue)
             try await newStream.startCapture()
 
@@ -85,10 +84,9 @@ final class SystemAudioSpectrumMonitor: NSObject {
                 return
             }
             stream = newStream
-            output = audioOutput
             isRunning = true
             isStarting = false
-            onCaptureStateChanged?(true)
+            reportCaptureState(true)
         } catch {
             await finishStartFailure()
         }
@@ -98,8 +96,23 @@ final class SystemAudioSpectrumMonitor: NSObject {
         isStarting = false
         isRunning = false
         stream = nil
-        output = nil
-        onCaptureStateChanged?(false)
+        reportCaptureState(false)
+    }
+}
+
+// MARK: - SCStreamDelegate（流被系统侧终止时的兜底，如权限被收回/显示器拓扑变化）
+
+extension SystemAudioSpectrumMonitor: SCStreamDelegate {
+    nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
+        Task { @MainActor [weak self] in
+            guard let self, self.stream === stream else { return }
+            // 主动 stop() 已先置空 self.stream，走到这里即系统侧外部终止：
+            // 清理状态并上报，避免 isRunning 卡死、频谱永久冻结。
+            self.stream = nil
+            self.isStarting = false
+            self.isRunning = false
+            self.reportCaptureState(false)
+        }
     }
 }
 
@@ -107,8 +120,8 @@ private final class AudioOutput: NSObject, SCStreamOutput {
     private let analyzer: AudioSpectrumAnalyzer
     private let levelsHandler: ([CGFloat]) -> Void
 
-    init(bandCount: Int, levelsHandler: @escaping ([CGFloat]) -> Void) {
-        self.analyzer = AudioSpectrumAnalyzer(bandCount: bandCount)
+    init(levelsHandler: @escaping ([CGFloat]) -> Void) {
+        self.analyzer = AudioSpectrumAnalyzer()
         self.levelsHandler = levelsHandler
         super.init()
     }
@@ -121,7 +134,9 @@ private final class AudioOutput: NSObject, SCStreamOutput {
 }
 
 private final class AudioSpectrumAnalyzer {
-    private let barCount: Int
+    // 7 列频谱：columnRecipes/Floors/Caps/transientWeights/motionPhases 均为 7 元素硬编码。
+    private static let barCount = 7
+
     private var lastDeliveryTime: CFTimeInterval = 0
 
     // Compact, mainstream-inspired spectrum pipeline:
@@ -156,13 +171,12 @@ private final class AudioSpectrumAnalyzer {
     private var activityEnvelope: CGFloat = 0.0
     private var phase: CGFloat = 0.0
 
-    init(bandCount: Int) {
-        self.barCount = max(5, bandCount)
+    init() {
         self.bandFloor = Array(repeating: 0.001, count: frequencies.count)
         self.bandPeak = Array(repeating: 0.040, count: frequencies.count)
         self.previousBands = Array(repeating: 0, count: frequencies.count)
-        self.columnLevels = Array(repeating: 0.050, count: max(7, bandCount))
-        self.columnPeaks = Array(repeating: 0.050, count: max(7, bandCount))
+        self.columnLevels = Array(repeating: 0.050, count: Self.barCount)
+        self.columnPeaks = Array(repeating: 0.050, count: Self.barCount)
     }
 
     func process(sampleBuffer: CMSampleBuffer) -> [CGFloat]? {
@@ -209,13 +223,13 @@ private final class AudioSpectrumAnalyzer {
         if phase > CGFloat.pi * 2 { phase -= CGFloat.pi * 2 }
 
         var targets: [CGFloat] = []
-        targets.reserveCapacity(barCount)
-        for index in 0..<barCount {
+        targets.reserveCapacity(Self.barCount)
+        for index in 0..<Self.barCount {
             targets.append(makeColumnTarget(index: index, bands: bands, flux: flux, energy: energy, motion: motion, gate: gate))
         }
 
         updateColumns(targets: targets, flux: flux, motion: motion)
-        return Array(columnLevels.prefix(barCount)).map { clamp($0, min: 0.018, max: 0.92) }
+        return Array(columnLevels.prefix(Self.barCount)).map { clamp($0, min: 0.018, max: 0.92) }
     }
 
     private func makeColumnTarget(index: Int, bands: [CGFloat], flux: CGFloat, energy: CGFloat, motion: CGFloat, gate: CGFloat) -> CGFloat {
@@ -275,7 +289,7 @@ private final class AudioSpectrumAnalyzer {
             columnLevels[index] += (idle - columnLevels[index]) * 0.22
             columnPeaks[index] += (idle - columnPeaks[index]) * 0.18
         }
-        return Array(columnLevels.prefix(barCount)).map { max(0.018, $0) }
+        return Array(columnLevels.prefix(Self.barCount)).map { max(0.018, $0) }
     }
 
     private func analyzeTimeDomain(_ samples: [Float]) -> (rms: CGFloat, peak: CGFloat, motion: CGFloat) {
@@ -375,6 +389,20 @@ private final class AudioSpectrumAnalyzer {
         return max(rmsGate, max(peakGate, motionGate))
     }
 
+    /// Hann 窗缓存：窗函数只依赖样本数，而频段循环（9 频段 × 90fps）反复用同一窗，
+    /// 按 buffer 容量预生成一次，避免每帧每频段重复算 cos。
+    private var hannWindowCache: [Float] = []
+
+    private func hannWindow(forCount count: Int) -> [Float] {
+        if hannWindowCache.count == count { return hannWindowCache }
+        let denominator = max(1, count - 1)
+        let window = (0..<count).map { index in
+            Float(0.5 - 0.5 * cos(2.0 * Double.pi * Double(index) / Double(denominator)))
+        }
+        hannWindowCache = window
+        return window
+    }
+
     private func goertzelMagnitude(samples: [Float], sampleRate: Double, frequency: Double) -> CGFloat {
         guard !samples.isEmpty, sampleRate > 0, frequency > 0 else { return 0 }
         let n = samples.count
@@ -383,10 +411,9 @@ private final class AudioSpectrumAnalyzer {
         var q0 = 0.0
         var q1 = 0.0
         var q2 = 0.0
-        let denominator = max(1, n - 1)
+        let window = hannWindow(forCount: n)
         for index in 0..<n {
-            let window = 0.5 - 0.5 * cos(2.0 * Double.pi * Double(index) / Double(denominator))
-            q0 = coefficient * q1 - q2 + Double(samples[index]) * window
+            q0 = coefficient * q1 - q2 + Double(samples[index]) * Double(window[index])
             q2 = q1
             q1 = q0
         }
@@ -525,59 +552,42 @@ private final class AudioSpectrumAnalyzer {
     }
 
     private static func deinterleavedFloatSamples(data: UnsafeRawPointer, byteCount: Int, channelCount: Int) -> [Float] {
-        let valueCount = byteCount / MemoryLayout<Float>.size
-        guard valueCount > 0 else { return [] }
-        let pointer = data.assumingMemoryBound(to: Float.self)
-        if channelCount <= 1 {
-            return Array(UnsafeBufferPointer(start: pointer, count: valueCount))
-        }
-        let frameCount = valueCount / channelCount
-        var mono = Array(repeating: Float(0), count: frameCount)
-        for frame in 0..<frameCount {
-            var sum = Float(0)
-            let base = frame * channelCount
-            for channel in 0..<channelCount {
-                sum += pointer[base + channel]
-            }
-            mono[frame] = sum / Float(channelCount)
-        }
-        return mono
+        deinterleavedSamples(
+            data: data, byteCount: byteCount, channelCount: channelCount,
+            as: Float.self
+        ) { $0 }
     }
 
     private static func deinterleavedInt16Samples(data: UnsafeRawPointer, byteCount: Int, channelCount: Int) -> [Float] {
-        let valueCount = byteCount / MemoryLayout<Int16>.size
-        guard valueCount > 0 else { return [] }
-        let pointer = data.assumingMemoryBound(to: Int16.self)
-        if channelCount <= 1 {
-            var mono: [Float] = []
-            mono.reserveCapacity(valueCount)
-            for index in 0..<valueCount {
-                mono.append(Float(pointer[index]) / 32768.0)
-            }
-            return mono
-        }
-        let frameCount = valueCount / channelCount
-        var mono = Array(repeating: Float(0), count: frameCount)
-        for frame in 0..<frameCount {
-            var sum = Float(0)
-            let base = frame * channelCount
-            for channel in 0..<channelCount {
-                sum += Float(pointer[base + channel]) / 32768.0
-            }
-            mono[frame] = sum / Float(channelCount)
-        }
-        return mono
+        deinterleavedSamples(
+            data: data, byteCount: byteCount, channelCount: channelCount,
+            as: Int16.self
+        ) { Float($0) / 32768.0 }
     }
 
     private static func deinterleavedInt32Samples(data: UnsafeRawPointer, byteCount: Int, channelCount: Int) -> [Float] {
-        let valueCount = byteCount / MemoryLayout<Int32>.size
+        deinterleavedSamples(
+            data: data, byteCount: byteCount, channelCount: channelCount,
+            as: Int32.self
+        ) { Float(Double($0) / 2_147_483_648.0) }
+    }
+
+    /// 交错采样 → 单声道均值，骨架共用，仅单样本换算由 `convert` 决定。
+    private static func deinterleavedSamples<T>(
+        data: UnsafeRawPointer,
+        byteCount: Int,
+        channelCount: Int,
+        as type: T.Type,
+        convert: (T) -> Float
+    ) -> [Float] {
+        let valueCount = byteCount / MemoryLayout<T>.size
         guard valueCount > 0 else { return [] }
-        let pointer = data.assumingMemoryBound(to: Int32.self)
+        let pointer = data.assumingMemoryBound(to: T.self)
         if channelCount <= 1 {
             var mono: [Float] = []
             mono.reserveCapacity(valueCount)
             for index in 0..<valueCount {
-                mono.append(Float(Double(pointer[index]) / 2_147_483_648.0))
+                mono.append(convert(pointer[index]))
             }
             return mono
         }
@@ -587,7 +597,7 @@ private final class AudioSpectrumAnalyzer {
             var sum = Float(0)
             let base = frame * channelCount
             for channel in 0..<channelCount {
-                sum += Float(Double(pointer[base + channel]) / 2_147_483_648.0)
+                sum += convert(pointer[base + channel])
             }
             mono[frame] = sum / Float(channelCount)
         }

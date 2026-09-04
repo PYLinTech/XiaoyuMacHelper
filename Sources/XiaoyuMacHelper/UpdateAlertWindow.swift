@@ -48,7 +48,7 @@ final class UpdateAlertWindow: NSWindow {
     func show() {
         center()
         makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
     }
 
     override func close() {
@@ -71,7 +71,6 @@ final class UpdateAlertWindow: NSWindow {
     /// 进入安装模式：隐藏确认区，显示进度条与状态文字。
     func enterInstallingMode() {
         isInstalling = true
-        iconView.isHidden = false
         titleLabel.stringValue = "正在更新到 v\(latestVersionDescription)…"
         titleLabel.isHidden = false
         logScrollView.isHidden = true
@@ -218,7 +217,9 @@ final class UpdateAlertWindow: NSWindow {
         logTextView.frame = NSRect(x: 0, y: 0, width: logFrame.width, height: logFrame.height)
         logTextView.textContainer?.containerSize = NSSize(width: logFrame.width, height: .greatestFiniteMagnitude)
         // 立即按最终容器宽度完成文本布局，textView 高度随之增长，过长日志才能正确出现滚动条。
-        logTextView.layoutManager?.ensureLayout(for: logTextView.textContainer!)
+        if let container = logTextView.textContainer {
+            logTextView.layoutManager?.ensureLayout(for: container)
+        }
 
         let versionHeight: CGFloat = 20
         let versionY = logFrame.minY - versionHeight - 12

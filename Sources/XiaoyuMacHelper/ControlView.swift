@@ -33,7 +33,6 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private struct ApplicationChoice: Hashable {
         let bundleIdentifier: String
         let displayName: String
-        let path: String
     }
 
     private var page: Page = .modules
@@ -41,6 +40,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private var desktopLyricsSourceOrder = DesktopLyricsSource.defaultOrder
     private var isAccessibilityEnabledForDisplay = false
     private var isSearchTemplateCustom = false
+    private var lastCommittedSearchTemplate: String?
 
     private let glassContainer = LiquidGlassContainerView()
     private let glassContentView = NSView()
@@ -63,6 +63,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let selectionToolbarCheckbox = NSButton(checkboxWithTitle: "选区工具栏", target: nil, action: nil)
     private let activeVisionCheckbox = NSButton(checkboxWithTitle: "主动视觉感知", target: nil, action: nil)
     private let desktopLyricsCheckbox = NSButton(checkboxWithTitle: "音乐歌词", target: nil, action: nil)
+    private let slideshowAnnotationCheckbox = NSButton(checkboxWithTitle: "幻灯片批注", target: nil, action: nil)
     private let clickToDisableCheckbox = NSButton(checkboxWithTitle: "点击指示器取消大写", target: nil, action: nil)
     private let selectionToolbarSettingTitle = NSTextField(labelWithString: "设置")
     private let selectionToolbarHideInFullscreenCheckbox = NSButton(checkboxWithTitle: "全屏时隐藏选区工具栏", target: nil, action: nil)
@@ -71,6 +72,8 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let selectionToolbarSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let activeVisionSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let desktopLyricsSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
+    /// 幻灯片批注无独立设置页，占位以复用模块行布局，始终隐藏。
+    private let slideshowAnnotationSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let backButton = IconButtonView(systemSymbolName: "chevron.left", accessibilityDescription: "返回", backgroundStyle: .glass)
     private let loginItemButton = NSButton(title: "前往设置启动项", target: nil, action: nil)
     private let accessibilityButton = NSButton(title: "前往设置辅助功能", target: nil, action: nil)
@@ -90,7 +93,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let activeVisionGazeCheckbox = NSButton(checkboxWithTitle: "注视屏幕时不要息屏", target: nil, action: nil)
     private let activeVisionFacingCheckbox = NSButton(checkboxWithTitle: "面向屏幕时不要息屏", target: nil, action: nil)
     private let activeVisionNotifyCheckbox = NSButton(checkboxWithTitle: "延迟息屏时通知", target: nil, action: nil)
-    private let desktopLyricsHintLabel = NSTextField(labelWithString: "启用的形态会同步显示；灵动大陆可视化频谱需录音权限；下方歌词源可拖动排序。")
+    private let desktopLyricsHintLabel = NSTextField(labelWithString: "")
     private let desktopLyricsLanguageLabel = NSTextField(labelWithString: "首选语言：")
     private let desktopLyricsLanguagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let desktopLyricsSurfaceCheckbox = NSButton(checkboxWithTitle: "桌面歌词", target: nil, action: nil)
@@ -157,8 +160,10 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let whitelistAddButton = IconButtonView(systemSymbolName: "plus", accessibilityDescription: "添加", backgroundStyle: .glass)
     private let whitelistRemoveButton = IconButtonView(systemSymbolName: "minus", accessibilityDescription: "移除", backgroundStyle: .glass)
     private var availableApplications: [ApplicationChoice] = []
+    private var isLoadingAvailableApplications = false
+    private var needsWhitelistRerenderWhenLoaded = false
+    private var lastRenderedWhitelistRawValue: String?
     private var whitelistApplications: [ApplicationChoice] = []
-    private var currentWhitelistRawValue = ""
     private let appleMusicSourceRow = DesktopLyricsSourceRow(source: .appleMusic)
     private let qqMusicSourceRow = DesktopLyricsSourceRow(source: .qqMusic)
     private let neteaseSourceRow = DesktopLyricsSourceRow(source: .netease)
@@ -172,6 +177,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     var onSelectionToolbarHideInFullscreenChanged: ((Bool) -> Void)?
     var onActiveVisionChanged: ((Bool) -> Void)?
     var onDesktopLyricsChanged: ((Bool) -> Void)?
+    var onSlideshowAnnotationChanged: ((Bool) -> Void)?
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
     var onSelectionToolbarActionMoved: ((ToolbarAction, Int) -> Void)?
     var onDesktopLyricsSourceMoved: ((DesktopLyricsSource, Int) -> Void)?
@@ -234,7 +240,6 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     func render(settings: AppSettings, isLoginItemEnabled: Bool, isAccessibilityEnabled: Bool) {
         selectionToolbarOrder = settings.selectionToolbarOrder
         desktopLyricsSourceOrder = settings.desktopLyricsSourceOrder
-        desktopLyricsLanguagePopup.selectItem(at: DesktopLyricsPreferredLanguage.allCases.firstIndex(of: settings.desktopLyricsPreferredLanguage) ?? 0)
         isAccessibilityEnabledForDisplay = isAccessibilityEnabled
         loginItemCheckbox.state = isLoginItemEnabled ? .on : .off
         accessibilityCheckbox.state = isAccessibilityEnabled ? .on : .off
@@ -243,6 +248,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         selectionToolbarHideInFullscreenCheckbox.state = settings.isSelectionToolbarHideInFullscreen ? .on : .off
         activeVisionCheckbox.state = settings.isActiveVisionEnabled ? .on : .off
         desktopLyricsCheckbox.state = settings.isDesktopLyricsEnabled ? .on : .off
+        slideshowAnnotationCheckbox.state = settings.isSlideshowAnnotationEnabled ? .on : .off
         clickToDisableCheckbox.state = settings.isClickToDisableEnabled ? .on : .off
         selectAllRow.setEnabled(settings.isSelectionToolbarSelectAllEnabled)
         copyRow.setEnabled(settings.isSelectionToolbarCopyEnabled)
@@ -309,6 +315,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         configureCheckbox(selectionToolbarCheckbox, size: 14, weight: .medium, action: #selector(selectionToolbarCheckboxChanged))
         configureCheckbox(activeVisionCheckbox, size: 14, weight: .medium, action: #selector(activeVisionCheckboxChanged))
         configureCheckbox(desktopLyricsCheckbox, size: 14, weight: .medium, action: #selector(desktopLyricsCheckboxChanged))
+        configureCheckbox(slideshowAnnotationCheckbox, size: 14, weight: .medium, action: #selector(slideshowAnnotationCheckboxChanged))
         configureCheckbox(clickToDisableCheckbox, size: 14, weight: .regular, action: #selector(clickToDisableCheckboxChanged), in: settingsContentView)
         configureCheckbox(selectionToolbarHideInFullscreenCheckbox, size: 14, weight: .regular, action: #selector(selectionToolbarHideInFullscreenChanged), in: settingsContentView)
 
@@ -319,7 +326,8 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         settingsContentView.addSubview(selectionToolbarSettingTitle)
         settingsContentView.addSubview(selectionToolbarOrderTitle)
 
-        [capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, backButton].forEach { addSubview($0) }
+        [capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, slideshowAnnotationSettingsButton, backButton].forEach { addSubview($0) }
+        slideshowAnnotationSettingsButton.isHidden = true
         capsLockSettingsButton.onClick = { [weak self] in self?.showCapsLockSettingsPage() }
         selectionToolbarSettingsButton.onClick = { [weak self] in self?.showSelectionToolbarSettingsPage() }
         activeVisionSettingsButton.onClick = { [weak self] in self?.showActiveVisionSettingsPage() }
@@ -597,6 +605,10 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         onDesktopLyricsChanged?(desktopLyricsCheckbox.state == .on)
     }
 
+    @objc private func slideshowAnnotationCheckboxChanged() {
+        onSlideshowAnnotationChanged?(slideshowAnnotationCheckbox.state == .on)
+    }
+
     @objc private func loginItemCheckboxChanged() {
         onLoginItemChanged?(loginItemCheckbox.state == .on)
     }
@@ -713,11 +725,15 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     }
 
     func controlTextDidEndEditing(_ notification: Notification) {
+        // 回车场景 action 与 end-editing 会先后到达：以最近提交值为幂等闸门去重。
         if notification.object as? NSTextField === searchTemplateField { commitSearchTemplate() }
     }
 
     private func commitSearchTemplate() {
-        onSearchTemplateChanged?(searchTemplateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        let trimmed = searchTemplateField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != lastCommittedSearchTemplate else { return }
+        lastCommittedSearchTemplate = trimmed
+        onSearchTemplateChanged?(trimmed)
     }
 
     @objc private func screenshotSaveDirectoryClicked() {
@@ -918,10 +934,35 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     }
 
     private func commitWhitelistApplications() {
-        onMusicLyricsAppWhitelistChanged?(whitelistApplications.isEmpty ? "__empty__" : whitelistApplications.map(\.bundleIdentifier).joined(separator: "\n"))
+        onMusicLyricsAppWhitelistChanged?(whitelistApplications.isEmpty ? musicLyricsAppWhitelistEmptySentinel : whitelistApplications.map(\.bundleIdentifier).joined(separator: "\n"))
     }
 
-    private func refreshAvailableApplications() {
+    private func refreshAvailableApplications(reRenderWhitelistWhenDone: Bool = false) {
+        if reRenderWhitelistWhenDone {
+            needsWhitelistRerenderWhenLoaded = true
+        }
+        guard !isLoadingAvailableApplications else { return }
+        isLoadingAvailableApplications = true
+        Task { [weak self] in
+            let apps = await Task.detached(priority: .utility) {
+                Self.enumerateApplications()
+            }.value
+
+            guard let self else { return }
+            self.isLoadingAvailableApplications = false
+            self.availableApplications = apps
+
+            if self.needsWhitelistRerenderWhenLoaded {
+                self.needsWhitelistRerenderWhenLoaded = false
+                if let rawValue = self.lastRenderedWhitelistRawValue {
+                    self.renderWhitelist(rawValue)
+                }
+            }
+        }
+    }
+
+    /// 递归枚举应用目录（后台线程调用）：/Applications 全量遍历较慢，禁止在主线程执行。
+    private nonisolated static func enumerateApplications() -> [ApplicationChoice] {
         let roots = [
             "/Applications",
             "/System/Applications",
@@ -942,12 +983,11 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
                 let displayName = localizedApplicationName(bundle: bundle, url: url)
                 appsByBundleID[bundleIdentifier] = ApplicationChoice(
                     bundleIdentifier: bundleIdentifier,
-                    displayName: displayName,
-                    path: url.path
+                    displayName: displayName
                 )
             }
         }
-        availableApplications = appsByBundleID.values.sorted {
+        return appsByBundleID.values.sorted {
             $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
         }
     }
@@ -963,8 +1003,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         let app = whitelistApplications.indices.contains(row) ? whitelistApplications[row] : nil
         view.set(
             title: app?.displayName ?? "",
-            subtitle: app?.bundleIdentifier ?? "",
-            isSelected: tableView.selectedRow == row
+            subtitle: app?.bundleIdentifier ?? ""
         )
         return view
     }
@@ -981,7 +1020,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         updateWhitelistSelectionState()
     }
 
-    private func localizedApplicationName(bundle: Bundle, url: URL) -> String {
+    private nonisolated static func localizedApplicationName(bundle: Bundle, url: URL) -> String {
         let keys = ["CFBundleDisplayName", "CFBundleName"]
         for key in keys {
             if let value = bundle.localizedInfoDictionary?[key] as? String, !value.isEmpty { return value }
@@ -1017,16 +1056,9 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     }
 
     private func updateVerticalScrollerVisibility(for scrollView: NSScrollView, contentHeight: CGFloat) {
-        scrollView.scrollerStyle = .overlay
-        scrollView.autohidesScrollers = true
-        scrollView.automaticallyAdjustsContentInsets = false
-        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-        scrollView.scrollerInsets = NSEdgeInsets(
-            top: Metrics.overlayScrollerVerticalInset,
-            left: 0,
-            bottom: Metrics.overlayScrollerVerticalInset,
-            right: Metrics.overlayScrollerRightInset
-        )
+        // 样式/内边距与 configureSystemScrollView 一致：重设一遍以兜住运行期
+        // 被外部改动的情况，这里只关心滚动条显隐的切换与重排。
+        configureSystemScrollView(scrollView)
 
         let visibleHeight = max(0, scrollView.contentView.bounds.height)
         let shouldShowVerticalScroller = contentHeight > visibleHeight + 1
@@ -1114,7 +1146,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         hideAllControls()
         show(
             titleLabel, versionLabel, checkUpdateButton, toolOptionsTitle, toolOptionsCard, loginItemCheckbox, accessibilityCheckbox,
-            moduleTitle, moduleCard, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox,
+            moduleTitle, moduleCard, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, slideshowAnnotationCheckbox,
             capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, loginItemButton, accessibilityButton,
             clearDataAndQuitButton, quitButton
         )
@@ -1189,6 +1221,13 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
             checkbox: desktopLyricsCheckbox,
             settingsButton: desktopLyricsSettingsButton,
             rowY: capsRowY - Metrics.rowHeight * 3,
+            cardFrame: moduleCardFrame
+        )
+
+        layoutModuleRow(
+            checkbox: slideshowAnnotationCheckbox,
+            settingsButton: slideshowAnnotationSettingsButton,
+            rowY: capsRowY - Metrics.rowHeight * 4,
             cardFrame: moduleCardFrame
         )
 
@@ -1728,10 +1767,6 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private func updateWhitelistSelectionState() {
         let selectedRow = whitelistTableView.selectedRow
         whitelistRemoveButton.isEnabled = selectedRow >= 0 && whitelistApplications.indices.contains(selectedRow)
-        for row in 0..<whitelistTableView.numberOfRows {
-            guard let cell = whitelistTableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WhitelistApplicationCell else { continue }
-            cell.setSelected(row == selectedRow)
-        }
     }
 
     private func layoutActiveVisionSettingsPage() {
@@ -1789,9 +1824,9 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
     private lazy var allControls: [NSView] = [
         titleLabel, versionLabel, checkUpdateButton, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard, settingsScrollView,
-        loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, clickToDisableCheckbox,
+        loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, slideshowAnnotationCheckbox, clickToDisableCheckbox,
         selectionToolbarSettingTitle, selectionToolbarHideInFullscreenCheckbox, selectionToolbarOrderTitle,
-        capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, backButton,
+        capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, slideshowAnnotationSettingsButton, backButton,
         loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, selectAllRow, copyRow, pasteRow, searchRow, screenshotRow,
         appleMusicSourceRow, qqMusicSourceRow, neteaseSourceRow, searchEnginePopup, searchTemplateField, screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox,
         screenshotRegionCheckbox, activeVisionGazeCheckbox, activeVisionFacingCheckbox, activeVisionNotifyCheckbox,
@@ -1908,13 +1943,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         dynamicIslandLyricsFontSizeSlider.doubleValue = settings.dynamicIslandLyricsFontSize
         dynamicIslandLyricsFontSizeValueLabel.stringValue = "\(Int(round(settings.dynamicIslandLyricsFontSize)))"
         dynamicIslandLyricsAlignmentPopup.selectItem(at: LyricsTextAlignment.allCases.firstIndex(of: settings.dynamicIslandLyricsAlignment) ?? 0)
-        if settings.dynamicIslandLyricsFontName.isEmpty {
-            dynamicIslandLyricsFontPopup.selectItem(withTitle: "系统默认")
-        } else if dynamicIslandLyricsFontPopup.item(withTitle: settings.dynamicIslandLyricsFontName) != nil {
-            dynamicIslandLyricsFontPopup.selectItem(withTitle: settings.dynamicIslandLyricsFontName)
-        } else {
-            dynamicIslandLyricsFontPopup.selectItem(withTitle: "系统默认")
-        }
+        selectFontPopup(dynamicIslandLyricsFontPopup, fontName: settings.dynamicIslandLyricsFontName)
         menuBarLyricsCheckbox.state = settings.isMenuBarLyricsEnabled ? .on : .off
         menuBarLyricsWidthSlider.doubleValue = settings.menuBarLyricsWidth
         menuBarLyricsWidthValueLabel.stringValue = "\(Int(round(settings.menuBarLyricsWidth))) px"
@@ -1922,11 +1951,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         desktopLyricsTranslationCheckbox.state = settings.desktopLyricsShowsTranslation ? .on : .off
         desktopLyricsLockCheckbox.state = settings.desktopLyricsLocked ? .on : .off
         desktopLyricsStylePopup.selectItem(at: DesktopLyricsStylePreset.allCases.firstIndex(of: settings.desktopLyricsStylePreset) ?? 0)
-        if settings.desktopLyricsFontName.isEmpty {
-            desktopLyricsFontPopup.selectItem(withTitle: "系统默认")
-        } else {
-            desktopLyricsFontPopup.selectItem(withTitle: settings.desktopLyricsFontName)
-        }
+        selectFontPopup(desktopLyricsFontPopup, fontName: settings.desktopLyricsFontName)
         desktopLyricsFontSizeSlider.doubleValue = settings.desktopLyricsFontSize
         desktopLyricsFontSizeValueLabel.stringValue = "\(Int(round(settings.desktopLyricsFontSize)))"
         let styleDefaults = DesktopLyricsUIPresetDefaults(preset: settings.desktopLyricsStylePreset)
@@ -1939,10 +1964,23 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         appleMusicClearTokenButton.isEnabled = hasAppleToken
     }
 
+    /// 字体弹窗选中回显（灵动岛/桌面歌词共用）：
+    /// 空名 → 系统默认；字体已卸载/名称不匹配时同样回退到系统默认。
+    private func selectFontPopup(_ popup: NSPopUpButton, fontName: String) {
+        if !fontName.isEmpty, popup.item(withTitle: fontName) != nil {
+            popup.selectItem(withTitle: fontName)
+        } else {
+            popup.selectItem(withTitle: "系统默认")
+        }
+    }
+
     private func renderWhitelist(_ rawValue: String) {
-        currentWhitelistRawValue = rawValue
-        refreshAvailableApplications()
-        if rawValue == "__empty__" {
+        lastRenderedWhitelistRawValue = rawValue
+        if availableApplications.isEmpty {
+            // 应用目录枚举在后台执行：首次渲染先用空缓存，枚举完成后按同一 rawValue 重渲染。
+            refreshAvailableApplications(reRenderWhitelistWhenDone: true)
+        }
+        if rawValue == musicLyricsAppWhitelistEmptySentinel {
             whitelistApplications = []
         } else if rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             whitelistApplications = defaultWhitelistApplications()
@@ -1960,7 +1998,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         let ids = Set(rawValue
             .components(separatedBy: CharacterSet(charactersIn: ",，\n"))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0 != "__empty__" })
+            .filter { !$0.isEmpty && $0 != musicLyricsAppWhitelistEmptySentinel })
         return availableApplications
             .filter { ids.contains($0.bundleIdentifier) }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -2025,16 +2063,14 @@ private final class WhitelistApplicationCell: NSTableCellView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func set(title: String, subtitle: String, isSelected: Bool) {
+    func set(title: String, subtitle: String) {
         titleLabel.stringValue = title
         subtitleLabel.stringValue = subtitle
-        setSelected(isSelected)
-        needsLayout = true
-    }
-
-    func setSelected(_ isSelected: Bool) {
+        // 选中高亮由 WhitelistApplicationRowView.drawCustomSelectionIfNeeded 承担，
+        // 文字颜色恒定，无需随选中态变化。
         titleLabel.textColor = .labelColor
         subtitleLabel.textColor = .secondaryLabelColor
+        needsLayout = true
     }
 
     override func layout() {

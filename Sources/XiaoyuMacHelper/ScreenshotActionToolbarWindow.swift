@@ -37,7 +37,7 @@ final class ScreenshotActionToolbarWindow: FloatingOverlayPanel {
         )
 
         configureFloatingOverlay()
-        level = .screenSaver
+        level = ScreenshotWindowLevel.screenshot
 
         let background = LiquidGlassEffectView(frame: contentView?.bounds ?? .zero)
         background.autoresizingMask = [.width, .height]

@@ -4,14 +4,14 @@ import Carbon
 // MARK: - 批注工具与元素模型
 
 /// 批注工具（互斥单选）。
-enum AnnotationTool: Int {
+enum AnnotationTool {
     case text
     case arrow
     case rect
 }
 
 /// 批注线宽档位（三档）：作用于箭头杆宽与矩形描边（图像像素），只影响新绘制的元素。
-enum AnnotationThickness: Int, CaseIterable {
+enum AnnotationThickness: CaseIterable {
     case thin
     case medium
     case thick
@@ -87,16 +87,17 @@ final class AnnotationCanvasView: NSView {
         static let adjustHandleHitRadius: CGFloat = 26   // 角点命中半径（视图 pt）
         static let textMinFontSize: CGFloat = 8      // 文本最小字号（图像像素）
         static let textMaxFontSize: CGFloat = 200    // 文本最大字号（图像像素）
+        static let maxHistoryDepth = 100             // 撤销栈上限
     }
 
     private var image: NSImage?
     private var imageRect = NSRect.zero
     /// 选区（图像坐标），绘制为虚线轮廓提示截图范围。
-    var selectionRect = NSRect.zero
+    private var selectionRect = NSRect.zero
     /// 当前可见区域（图像坐标，宽高比恒等于画布可用区）。
-    private(set) var zoomRect = NSRect.zero
-    private(set) var elements: [AnnotationElement] = []
-    private(set) var redoStack: [[AnnotationElement]] = []
+    private var zoomRect = NSRect.zero
+    private var elements: [AnnotationElement] = []
+    private var redoStack: [[AnnotationElement]] = []
 
     var currentTool: AnnotationTool = .arrow
     var currentColor: NSColor = .systemRed
@@ -114,11 +115,14 @@ final class AnnotationCanvasView: NSView {
     private var zoomAnimationTimer: Timer?
     private var zoomAnimationStart: CFTimeInterval = 0
     private var isAnimatingZoom = false
+    /// 方向键微调的撤销合并状态（见 nudgeSelected）。
+    private var lastNudgeAt: Date?
+    private var lastNudgeElementIndex: Int?
 
     // MARK: 对象式选中与手柄（主流批注交互：选中 → 移动/缩放/旋转/删除）
 
     /// 当前选中元素索引；nil = 无选中。
-    private(set) var selectedIndex: Int?
+    private var selectedIndex: Int?
     /// 指针位置（图像坐标）：驱动隐性角点的浮现与线框光标判定。
     private var hoverPoint: NSPoint?
     /// 正在拖拽的手柄。
@@ -154,12 +158,12 @@ final class AnnotationCanvasView: NSView {
         case arrowEndpoint(Int)   // 0 = 起点, 1 = 终点
     }
 
-    /// 快照式撤销栈：每次提交变更前压入完整元素数组（上限 50 步）。
+    /// 快照式撤销栈：每次提交变更前压入完整元素数组（上限 100 步）。
     private var historyStack: [[AnnotationElement]] = []
     private var gestureSnapshot: [AnnotationElement]?
 
     /// 调整选区模式：复用选区截图的角点/拖动交互，批注元素作为虚拟层保留不丢弃。
-    private(set) var isAdjustingSelection = false
+    private var isAdjustingSelection = false
     var onAdjustModeChanged: ((Bool) -> Void)?
 
     private enum AdjustCorner {
@@ -198,15 +202,18 @@ final class AnnotationCanvasView: NSView {
         gestureSnapshot = nil
         guard snapshot != elements else { return }
         historyStack.append(snapshot)
-        if historyStack.count > 50 { historyStack.removeFirst() }
+        if historyStack.count > Metrics.maxHistoryDepth { historyStack.removeFirst() }
         redoStack.removeAll()
         notifyHistoryAndRedraw()
     }
 
     /// 提交一次非手势变更（添加/删除/编辑）：先快照再改，由调用方完成 mutation。
     private func pushHistory() {
+        // 任何非微调的历史入栈都会打断方向键微调的撤销合并（见 nudgeSelected）。
+        lastNudgeAt = nil
+        lastNudgeElementIndex = nil
         historyStack.append(elements)
-        if historyStack.count > 50 { historyStack.removeFirst() }
+        if historyStack.count > Metrics.maxHistoryDepth { historyStack.removeFirst() }
         redoStack.removeAll()
     }
 
@@ -246,9 +253,33 @@ final class AnnotationCanvasView: NSView {
         )
     }
 
+    /// 会话结束（保存/取消/关闭）后由窗口 orderOut 统一调用：
+    /// 释放整屏 NSImage 与元素缓存，避免数十 MB 位图滞留到下一次会话。
+    func releaseSessionResources() {
+        image = nil
+        imageRect = .zero
+        elements.removeAll()
+        redoStack.removeAll()
+        historyStack.removeAll()
+        gestureSnapshot = nil
+        lastNudgeAt = nil
+        lastNudgeElementIndex = nil
+        // 与 configure() 的防御一致：终止可能残留的缩放动画，
+        // 避免 Timer 对已隐藏窗口继续触发 onZoomChanged。
+        zoomAnimationTimer?.invalidate()
+        zoomAnimationTimer = nil
+        isAnimatingZoom = false
+        needsDisplay = true
+    }
+
     // MARK: 配置与入场动画
 
     func configure(image cgImage: CGImage, selection: NSRect) {
+        // 复用窗口前先终止上一会话可能残留的缩放动画，
+        // 否则旧 Timer 会以 60fps 覆盖新会话的 zoomRect 并吞掉滚轮缩放。
+        zoomAnimationTimer?.invalidate()
+        zoomAnimationTimer = nil
+        isAnimatingZoom = false
         self.image = NSImage(
             cgImage: cgImage,
             size: NSSize(width: cgImage.width, height: cgImage.height)
@@ -808,10 +839,20 @@ final class AnnotationCanvasView: NSView {
     }
 
     /// 方向键微调选中元素（1 图像像素，Shift = 10）。
+    /// 连续微调（0.8s 内、同一元素、中间无其他历史操作）只入栈一次快照：
+    /// 否则按住方向键每秒产生十几条快照，会把撤销栈刷满单像素移动，
+    /// 挤掉微调前的真实编辑。
     private func nudgeSelected(keyCode: UInt16, fine: Bool) {
         guard let index = selectedIndex, elements.indices.contains(index) else { return }
         let step: CGFloat = fine ? 10 : 1
-        pushHistory()
+        let now = Date()
+        let isBurstContinuation = lastNudgeElementIndex == index
+            && lastNudgeAt.map { now.timeIntervalSince($0) < 0.8 } == true
+        if !isBurstContinuation {
+            pushHistory()
+        }
+        lastNudgeAt = now
+        lastNudgeElementIndex = index
         switch keyCode {
         case 123: elements[index].center.x -= step
         case 124: elements[index].center.x += step
@@ -1234,13 +1275,13 @@ final class AnnotationCanvasView: NSView {
 
         if isAdjustingSelection {
             // 调整选区模式：整图 + 选区外遮罩 + 虚拟批注层 + 选区边框与角点。
-            drawAdjustDimOverlay()
+            drawDimOverlay()
             for (index, element) in elements.enumerated() where index != editingElementIndex {
                 draw(element)
             }
             drawAdjustBorderAndHandles()
         } else {
-            drawAnnotationDimOverlay()
+            drawDimOverlay()
             drawSelectionOutline()
             for (index, element) in elements.enumerated() where index != editingElementIndex {
                 draw(element)
@@ -1250,7 +1291,8 @@ final class AnnotationCanvasView: NSView {
                 drawInProgress(from: start, to: current)
             }
         }
-        window?.invalidateCursorRects(for: self)
+        // 不在 draw 尾部调 invalidateCursorRects：缩放动画 60fps 重绘时逐帧重建
+        // 光标区（遍历全部元素算旋转角）纯属浪费；mouseMoved/Exited 处已按需刷新。
     }
 
     // MARK: 选中 UI（旋转后的边框 + 四角手柄 + 旋转柄 / 箭头双端点）
@@ -1437,18 +1479,8 @@ final class AnnotationCanvasView: NSView {
         return NSRect(x: minX - 4, y: minY - 4, width: maxX - minX + 8, height: maxY - minY + 8)
     }
 
-    /// 调整选区模式遮罩：选区外压暗、选区内透明（与选区截图一致）。
-    private func drawAdjustDimOverlay() {
-        let selRect = rectInView(selectionRect)
-        let path = NSBezierPath(rect: bounds)
-        path.append(NSBezierPath(rect: selRect))
-        path.windingRule = .evenOdd
-        NSColor.black.withAlphaComponent(0.42).setFill()
-        path.fill()
-    }
-
-    /// 批注模式遮罩：选区外压暗、选区内透明（强度与选区截图一致）。
-    private func drawAnnotationDimOverlay() {
+    /// 选区外压暗遮罩、选区内透明（调整选区/批注两模式共用同一观感）。
+    private func drawDimOverlay() {
         let selRect = rectInView(selectionRect)
         let path = NSBezierPath(rect: bounds)
         path.append(NSBezierPath(rect: selRect))
@@ -1642,27 +1674,37 @@ final class AnnotationCanvasView: NSView {
         )
         guard let cropped = cgImage.cropping(to: cropRect) else { return nil }
 
-        let output = NSImage(size: outputSize)
-        // lockFocusFlipped(true)：坐标系 y 向下，与图像坐标一致；元素可直接用 image 坐标绘制。
-        output.lockFocusFlipped(true)
-        guard let ctx = NSGraphicsContext.current?.cgContext else {
-            output.unlockFocus()
-            return nil
-        }
+        // 显式 1:1 位图上下文：输出像素 = 选区源像素，与无批注裁剪路径（crop）
+        // 分辨率一致。不用 NSImage + lockFocus：Retina 下 backing scale 2× 会把
+        // 1× 源图插值放大一倍再输出（输出体积 ×4、清晰度反降）。
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(
+            data: nil,
+            width: Int(outputSize.width),
+            height: Int(outputSize.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        // flipped=true：与原 lockFocusFlipped(true) 坐标系完全一致（y 向下），
+        // 元素绘制代码（含 NSString.draw(in:) 的多行行序）无需任何改动。
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
 
-        // 绘制图片：CTM flip × 1 抵消 lockFocusFlipped 带来的方向颠倒（实验 p3 验证）。
+        // 绘制图片：CTM flip × 1 抵消 flipped 上下文带来的方向颠倒（实验 p3 验证）。
         ctx.saveGState()
         ctx.translateBy(x: 0, y: outputSize.height)
         ctx.scaleBy(x: 1, y: -1)
         ctx.draw(cropped, in: CGRect(origin: .zero, size: outputSize))
         ctx.restoreGState()
 
-        // 元素：image 坐标 y 向下，与 lockFocusFlipped 坐标系一致，直接绘制无需镜像。
+        // 元素：image 坐标 y 向下，与 flipped 坐标系一致，直接绘制无需镜像。
         for element in elements {
             draw(element, forOutputBase: selectionRect)
         }
-        output.unlockFocus()
-        return output.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        NSGraphicsContext.restoreGraphicsState()
+        return ctx.makeImage()
     }
 
     /// 离屏合成绘制：坐标系与图像一致（y 向下），旋转用 +rotation（与屏幕 -rotation
@@ -1852,7 +1894,7 @@ final class AnnotationTextEditorView: NSView, NSTextViewDelegate {
 // MARK: - 批注工具栏按钮
 
 @MainActor
-final class AnnotationToolbarButton: NSButton {
+final class AnnotationToolbarButton: HoverTrackingButton {
     var isSelected = false {
         didSet { updateBackground() }
     }
@@ -1880,9 +1922,6 @@ final class AnnotationToolbarButton: NSButton {
 
     /// 非 nil 时显示 SF Symbol 图标（title 仅作无障碍回退文本）。
     private var iconName: String?
-
-    private var trackingAreaRef: NSTrackingArea?
-    private var isHovering = false
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -1914,26 +1953,7 @@ final class AnnotationToolbarButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func updateTrackingAreas() {
-        if let trackingAreaRef { removeTrackingArea(trackingAreaRef) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingAreaRef = area
-        super.updateTrackingAreas()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovering = true
-        updateBackground()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovering = false
+    override func hoverStateChanged() {
         updateBackground()
     }
 
@@ -1986,15 +2006,12 @@ final class AnnotationToolbarButton: NSButton {
 /// 当前批注颜色的矩形按钮：背景整块为选中色，文字固定「颜色」二字，
 /// 文字颜色按背景亮度自动黑/白（亮底黑字、暗底白字），hover 提亮背景并重算。
 @MainActor
-final class AnnotationColorButton: NSButton {
+final class AnnotationColorButton: HoverTrackingButton {
     var currentColor: NSColor = .systemRed {
         didSet { needsDisplay = true }   // 色点在 draw(_:) 自绘，改色必须显式触发重绘
     }
 
     var onClick: (() -> Void)?
-
-    private var trackingAreaRef: NSTrackingArea?
-    private var isHovering = false
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -2018,26 +2035,7 @@ final class AnnotationColorButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func updateTrackingAreas() {
-        if let trackingAreaRef { removeTrackingArea(trackingAreaRef) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingAreaRef = area
-        super.updateTrackingAreas()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovering = true
-        refreshStyle()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovering = false
+    override func hoverStateChanged() {
         refreshStyle()
     }
 
@@ -2074,15 +2072,12 @@ final class AnnotationColorButton: NSButton {
 /// 当前线宽的矩形按钮：自绘一条宽度随档位变化的水平短线作为"粗细"预览，
 /// 点击弹出三档选择面板；hover 提亮背景（与 AnnotationColorButton 交互同构）。
 @MainActor
-final class AnnotationThicknessButton: NSButton {
+final class AnnotationThicknessButton: HoverTrackingButton {
     var currentThickness: AnnotationThickness = .medium {
         didSet { needsDisplay = true }   // 线样在 draw(_:) 自绘，改档必须显式触发重绘
     }
 
     var onClick: (() -> Void)?
-
-    private var trackingAreaRef: NSTrackingArea?
-    private var isHovering = false
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -2106,26 +2101,7 @@ final class AnnotationThicknessButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func updateTrackingAreas() {
-        if let trackingAreaRef { removeTrackingArea(trackingAreaRef) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingAreaRef = area
-        super.updateTrackingAreas()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovering = true
-        refreshStyle()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovering = false
+    override func hoverStateChanged() {
         refreshStyle()
     }
 
@@ -2328,10 +2304,6 @@ final class AnnotationToolbarView: NSView {
         layoutSubtreeIfNeeded()
     }
 
-    func setCurrentColor(_ color: NSColor) {
-        currentColor = color
-    }
-
     func updateZoomPercent(_ scale: CGFloat) {
         zoomPercentLabel.stringValue = "\(Int((scale * 100).rounded()))%"
     }
@@ -2497,7 +2469,7 @@ final class AnnotationColorPanel: FloatingOverlayPanel {
             defer: false
         )
         configureFloatingOverlay()
-        level = .screenSaver
+        level = ScreenshotWindowLevel.screenshot
         hasShadow = true
 
         let background = LiquidGlassEffectView(frame: contentView?.bounds ?? .zero)
@@ -2566,15 +2538,12 @@ final class AnnotationColorPanel: FloatingOverlayPanel {
 /// 粗细选择面板的行按钮：左侧自绘该档位线样，右侧显示档位名（细/中/粗）；
 /// 悬停微亮、当前档整行高亮。
 @MainActor
-private final class AnnotationThicknessRowButton: NSButton {
+private final class AnnotationThicknessRowButton: HoverTrackingButton {
     let option: AnnotationThickness
     var isRowSelected = false {
         didSet { needsDisplay = true }
     }
     var onClick: (() -> Void)?
-
-    private var trackingAreaRef: NSTrackingArea?
-    private var isHovering = false
 
     /// 本视图翻转为 y 向下坐标系，便于文字与图形按"顶部基准"排布。
     override var isFlipped: Bool { true }
@@ -2601,26 +2570,7 @@ private final class AnnotationThicknessRowButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func updateTrackingAreas() {
-        if let trackingAreaRef { removeTrackingArea(trackingAreaRef) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingAreaRef = area
-        super.updateTrackingAreas()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHovering = true
-        needsDisplay = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovering = false
+    override func hoverStateChanged() {
         needsDisplay = true
     }
 
@@ -2693,7 +2643,7 @@ final class AnnotationThicknessPanel: FloatingOverlayPanel {
             defer: false
         )
         configureFloatingOverlay()
-        level = .screenSaver
+        level = ScreenshotWindowLevel.screenshot
         hasShadow = true
 
         let background = LiquidGlassEffectView(frame: contentView?.bounds ?? .zero)
@@ -2746,7 +2696,6 @@ final class ScreenshotAnnotationWindow: NSPanel {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
-    override var acceptsFirstResponder: Bool { true }
 
     init() {
         super.init(
@@ -2758,7 +2707,7 @@ final class ScreenshotAnnotationWindow: NSPanel {
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
         canHide = false
-        level = .screenSaver
+        level = ScreenshotWindowLevel.screenshot
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         backgroundColor = .black
         isOpaque = true
@@ -2864,7 +2813,7 @@ final class ScreenshotAnnotationWindow: NSPanel {
 
         // 全局热键截图时本 App 往往不在前台：不显式激活，首次点击会被「激活窗口」
         // 吞掉（acceptsFirstMouse 缺省 false），表现为进入批注后第一次拖动无效。
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         orderFrontRegardless()
         makeKey()
         makeFirstResponder(canvasView)
@@ -2906,7 +2855,18 @@ final class ScreenshotAnnotationWindow: NSPanel {
     override func orderOut(_ sender: Any?) {
         colorPanel.orderOut(nil)
         thicknessPanel.orderOut(nil)
+        canvasView.releaseSessionResources()
         super.orderOut(sender)
+    }
+}
+
+extension FloatingOverlayPanel {
+    /// 悬浮面板锚定定位的公共水平计算：面板水平居中于锚点，并 clamp 到屏幕内（左右各留 8pt）。
+    func clampedAnchorX(point: NSPoint, screenFrame: NSRect) -> CGFloat {
+        min(
+            max(point.x - frame.width / 2, screenFrame.minX + 8),
+            screenFrame.maxX - frame.width - 8
+        )
     }
 }
 
@@ -2917,10 +2877,7 @@ extension AnnotationThicknessPanel {
             ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
         // 水平居中于按钮，clamp 到屏幕内（同色板）；垂直优先置于按钮上方，
         // 上方放不下（如工具栏贴近屏顶）则翻转到下方。
-        let x = min(
-            max(point.x - frame.width / 2, screenFrame.minX + 8),
-            screenFrame.maxX - frame.width - 8
-        )
+        let x = clampedAnchorX(point: point, screenFrame: screenFrame)
         let aboveY = point.y + 6
         let y = aboveY + frame.height <= screenFrame.maxY
             ? aboveY
@@ -2936,10 +2893,7 @@ extension AnnotationColorPanel {
             ?? NSScreen.main?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
         // 水平居中于按钮，但 clamp 到屏幕内：颜色按钮靠近左缘时防止色板左侧被裁掉。
-        let x = min(
-            max(point.x - frame.width / 2, screenFrame.minX + 8),
-            screenFrame.maxX - frame.width - 8
-        )
+        let x = clampedAnchorX(point: point, screenFrame: screenFrame)
         setFrameOrigin(NSPoint(x: x, y: point.y + 6))
         orderFrontRegardless()
     }

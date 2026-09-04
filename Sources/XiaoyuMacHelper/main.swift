@@ -7,7 +7,7 @@ if let updateArgs = UpdateInstaller.parsePerformUpdateArguments() {
 
 let launchMode = LaunchMode.current()
 let instanceLock = SingleInstanceLock()
-guard instanceLock.acquireOrNotifyRunningInstance(shouldNotifyRunningInstance: launchMode.notifiesRunningInstance) else {
+guard instanceLock.acquireOrNotifyRunningInstance(shouldNotifyRunningInstance: launchMode.isUserInitiatedLaunch) else {
     exit(0)
 }
 

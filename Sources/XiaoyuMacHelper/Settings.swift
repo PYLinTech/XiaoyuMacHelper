@@ -74,10 +74,6 @@ enum DesktopLyricsPreferredLanguage: String, CaseIterable, Sendable {
         }
     }
 
-    var appleMusicLanguageTag: String {
-        appleMusicLyricsLanguageCandidates[0]
-    }
-
     var appleMusicLyricsLanguageCandidates: [String] {
         switch self {
         case .simplifiedChinese:
@@ -99,7 +95,6 @@ enum DesktopLyricsPreferredLanguage: String, CaseIterable, Sendable {
 
     var isSimplifiedChinese: Bool { self == .simplifiedChinese }
     var isTraditionalChinese: Bool { self == .traditionalChinese }
-    var prefersChineseLyrics: Bool { isSimplifiedChinese || isTraditionalChinese }
 
     func matches(ttml: String) -> Bool {
         let lowercased = ttml.lowercased()
@@ -223,6 +218,7 @@ struct AppSettings: Equatable, Sendable {
     var activeVisionPreventsDisplaySleepOnGaze: Bool
     var activeVisionPreventsDisplaySleepOnFacing: Bool
     var activeVisionNotifiesWhenExtendingDisplaySleep: Bool
+    var isSlideshowAnnotationEnabled: Bool
 
     var visibleSelectionToolbarActions: [ToolbarAction] {
         selectionToolbarOrder.filter(isSelectionToolbarActionEnabled)
@@ -256,16 +252,11 @@ struct ControlState: Equatable {
 }
 
 struct LaunchMode {
-    let showsControlWindowOnLaunch: Bool
-    let notifiesRunningInstance: Bool
+    /// 用户主动启动（非登录项自启）：显示控制窗，并通知已运行实例。
+    let isUserInitiatedLaunch: Bool
 
     static func current(arguments: [String] = CommandLine.arguments) -> LaunchMode {
-        let isLoginItemLaunch = arguments.contains(loginItemArgument)
-
-        return LaunchMode(
-            showsControlWindowOnLaunch: !isLoginItemLaunch,
-            notifiesRunningInstance: !isLoginItemLaunch
-        )
+        LaunchMode(isUserInitiatedLaunch: !arguments.contains(loginItemArgument))
     }
 }
 
@@ -308,7 +299,7 @@ final class SettingsStore {
             menuBarLyricsEnabledKey: false,
             menuBarLyricsWidthKey: 220.0,
             menuBarLyricsAlignmentKey: LyricsTextAlignment.defaultValue.rawValue,
-            "EnabledDesktopLyricsSources": DesktopLyricsSource.defaultOrder.map(\.rawValue),
+            desktopLyricsEnabledSourcesKey: DesktopLyricsSource.defaultOrder.map(\.rawValue),
             desktopLyricsSourceOrderKey: DesktopLyricsSource.defaultOrder.map(\.rawValue),
             desktopLyricsPreferredLanguageKey: DesktopLyricsPreferredLanguage.defaultValue.rawValue,
             desktopLyricsShowsTranslationKey: true,
@@ -325,7 +316,8 @@ final class SettingsStore {
             appleMusicMediaUserTokenKey: "",
             activeVisionPreventDisplaySleepOnGazeKey: true,
             activeVisionPreventDisplaySleepOnFacingKey: true,
-            activeVisionNotifyWhenExtendingDisplaySleepKey: true
+            activeVisionNotifyWhenExtendingDisplaySleepKey: true,
+            slideshowAnnotationEnabledKey: false
         ])
 
         if !defaults.bool(forKey: selectionToolbarDefaultOffMigrationKey) {
@@ -339,7 +331,7 @@ final class SettingsStore {
         let order = normalizedOrder(savedOrder.compactMap(ToolbarAction.init(rawValue:)))
         let savedDesktopLyricsSourceOrder = defaults.stringArray(forKey: desktopLyricsSourceOrderKey) ?? []
         let desktopLyricsSourceOrder = normalizedDesktopLyricsSourceOrder(savedDesktopLyricsSourceOrder.compactMap(DesktopLyricsSource.init(rawValue:)))
-        let savedEnabledSources = defaults.stringArray(forKey: "EnabledDesktopLyricsSources") ?? DesktopLyricsSource.defaultOrder.map(\.rawValue)
+        let savedEnabledSources = defaults.stringArray(forKey: desktopLyricsEnabledSourcesKey) ?? DesktopLyricsSource.defaultOrder.map(\.rawValue)
         let enabledSources = normalizedEnabledDesktopLyricsSources(savedEnabledSources.compactMap(DesktopLyricsSource.init(rawValue:)))
         let preferredLanguage = defaults.string(forKey: desktopLyricsPreferredLanguageKey)
             .flatMap(DesktopLyricsPreferredLanguage.init(rawValue:)) ?? DesktopLyricsPreferredLanguage.defaultValue
@@ -351,13 +343,12 @@ final class SettingsStore {
             .flatMap(LyricsTextAlignment.init(rawValue:)) ?? LyricsTextAlignment.defaultValue
         let menuBarLyricsAlignment = defaults.string(forKey: menuBarLyricsAlignmentKey)
             .flatMap(LyricsTextAlignment.init(rawValue:)) ?? LyricsTextAlignment.defaultValue
-        let persistentDefaults = defaults.persistentDomain(forName: Bundle.main.bundleIdentifier ?? appIdentifier) ?? [:]
         let legacyDynamicIslandShapeRatio = Self.clampedDynamicIslandLyricsRatio(defaults.double(forKey: dynamicIslandLyricsBottomRatioKey))
         let dynamicIslandSlantRatio = Self.clampedDynamicIslandLyricsRatio(
-            Self.persistedDouble(in: persistentDefaults, forKey: dynamicIslandLyricsSlantRatioKey) ?? legacyDynamicIslandShapeRatio
+            Self.explicitDouble(defaults, forKey: dynamicIslandLyricsSlantRatioKey) ?? legacyDynamicIslandShapeRatio
         )
         let dynamicIslandCornerRatio = Self.clampedDynamicIslandLyricsRatio(
-            Self.persistedDouble(in: persistentDefaults, forKey: dynamicIslandLyricsCornerRatioKey) ?? legacyDynamicIslandShapeRatio
+            Self.explicitDouble(defaults, forKey: dynamicIslandLyricsCornerRatioKey) ?? legacyDynamicIslandShapeRatio
         )
 
         return AppSettings(
@@ -411,7 +402,8 @@ final class SettingsStore {
             appleMusicMediaUserToken: defaults.string(forKey: appleMusicMediaUserTokenKey) ?? "",
             activeVisionPreventsDisplaySleepOnGaze: defaults.bool(forKey: activeVisionPreventDisplaySleepOnGazeKey),
             activeVisionPreventsDisplaySleepOnFacing: defaults.bool(forKey: activeVisionPreventDisplaySleepOnFacingKey),
-            activeVisionNotifiesWhenExtendingDisplaySleep: defaults.bool(forKey: activeVisionNotifyWhenExtendingDisplaySleepKey)
+            activeVisionNotifiesWhenExtendingDisplaySleep: defaults.bool(forKey: activeVisionNotifyWhenExtendingDisplaySleepKey),
+            isSlideshowAnnotationEnabled: defaults.bool(forKey: slideshowAnnotationEnabledKey)
         )
     }
 
@@ -538,7 +530,7 @@ final class SettingsStore {
         } else if !isEnabled {
             sources.removeAll { $0 == source }
         }
-        defaults.set(sources.map(\.rawValue), forKey: "EnabledDesktopLyricsSources")
+        defaults.set(sources.map(\.rawValue), forKey: desktopLyricsEnabledSourcesKey)
     }
 
     func setAppleMusicMediaUserToken(_ token: String) {
@@ -594,18 +586,9 @@ final class SettingsStore {
     }
 
     func moveDesktopLyricsSource(_ source: DesktopLyricsSource, direction: Int) {
-        var order = read().desktopLyricsSourceOrder
-        guard let index = order.firstIndex(of: source) else {
+        guard let order = orderMoved(source, direction: direction, in: read().desktopLyricsSourceOrder) else {
             return
         }
-
-        let newIndex = max(0, min(order.count - 1, index + direction))
-        guard newIndex != index else {
-            return
-        }
-
-        order.remove(at: index)
-        order.insert(source, at: newIndex)
         defaults.set(order.map(\.rawValue), forKey: desktopLyricsSourceOrderKey)
     }
 
@@ -621,26 +604,37 @@ final class SettingsStore {
         defaults.set(isEnabled, forKey: activeVisionNotifyWhenExtendingDisplaySleepKey)
     }
 
+    func setSlideshowAnnotationEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: slideshowAnnotationEnabledKey)
+    }
+
     func clearPersistentData() {
         let domain = Bundle.main.bundleIdentifier ?? appIdentifier
         defaults.removePersistentDomain(forName: domain)
-        defaults.synchronize()
     }
 
     func moveSelectionToolbarAction(_ action: ToolbarAction, direction: Int) {
-        var order = read().selectionToolbarOrder
-        guard let index = order.firstIndex(of: action) else {
+        guard let order = orderMoved(action, direction: direction, in: read().selectionToolbarOrder) else {
             return
+        }
+        defaults.set(order.map(\.rawValue), forKey: selectionToolbarOrderKey)
+    }
+
+    /// 将 element 在 order 中按 direction 移动一位；越界或找不到时返回 nil。
+    private func orderMoved<T: Equatable>(_ element: T, direction: Int, in order: [T]) -> [T]? {
+        guard let index = order.firstIndex(of: element) else {
+            return nil
         }
 
         let newIndex = max(0, min(order.count - 1, index + direction))
         guard newIndex != index else {
-            return
+            return nil
         }
 
-        order.remove(at: index)
-        order.insert(action, at: newIndex)
-        defaults.set(order.map(\.rawValue), forKey: selectionToolbarOrderKey)
+        var result = order
+        result.remove(at: index)
+        result.insert(element, at: newIndex)
+        return result
     }
 
     private func normalizedOrder(_ savedOrder: [ToolbarAction]) -> [ToolbarAction] {
@@ -683,45 +677,45 @@ final class SettingsStore {
         savedSources.filter { DesktopLyricsSource.defaultOrder.contains($0) }
     }
 
-    private static func persistedDouble(in dictionary: [String: Any], forKey key: String) -> Double? {
-        if let value = dictionary[key] as? Double {
-            return value
-        }
-        if let value = dictionary[key] as? NSNumber {
-            return value.doubleValue
-        }
-        return nil
+    /// 读取「用户显式写入过」的 Double（区分未写入与写过 0——double(forKey:) 对两者都返回 0）。
+    /// 用 object(forKey:) 判空即可，勿用 persistentDomain(forName:) 整域拷贝（read() 高频调用）。
+    private static func explicitDouble(_ defaults: UserDefaults, forKey key: String) -> Double? {
+        defaults.object(forKey: key) as? Double
     }
 
-    private static func clampedDesktopLyricsFontSize(_ value: Double) -> Double {
+    // MARK: 数值边界（单一来源：App 层 setter 与 read() 共用，避免双处维护漂移）
+    // 注：0 → 默认值的回退仅服务 read() 对「未写入」键的兜底；App 层 setter
+    // 统一在写入后 read() 回读，clamp 结果天然一致。
+
+    static func clampedDesktopLyricsFontSize(_ value: Double) -> Double {
         min(48.0, max(18.0, value == 0 ? 28.0 : value))
     }
 
-    private static func clampedDesktopLyricsWidth(_ value: Double) -> Double {
+    static func clampedDesktopLyricsWidth(_ value: Double) -> Double {
         min(2200.0, max(260.0, value == 0 ? 980.0 : value))
     }
 
-    private static func clampedDynamicIslandLyricsWidth(_ value: Double) -> Double {
+    static func clampedDynamicIslandLyricsWidth(_ value: Double) -> Double {
         min(1700.0, max(360.0, value == 0 ? 900.0 : value))
     }
 
-    private static func clampedDynamicIslandLyricsBlankWidth(_ value: Double) -> Double {
+    static func clampedDynamicIslandLyricsBlankWidth(_ value: Double) -> Double {
         min(900.0, max(60.0, value == 0 ? 210.0 : value))
     }
 
-    private static func clampedDynamicIslandLyricsHeight(_ value: Double) -> Double {
+    static func clampedDynamicIslandLyricsHeight(_ value: Double) -> Double {
         min(180.0, max(32.0, value == 0 ? 58.0 : value))
     }
 
-    private static func clampedDynamicIslandLyricsRatio(_ value: Double) -> Double {
+    static func clampedDynamicIslandLyricsRatio(_ value: Double) -> Double {
         min(1.0, max(0.01, value == 0 ? 0.55 : value))
     }
 
-    private static func clampedDynamicIslandLyricsFontSize(_ value: Double) -> Double {
+    static func clampedDynamicIslandLyricsFontSize(_ value: Double) -> Double {
         min(64.0, max(11.0, value == 0 ? 15.0 : value))
     }
 
-    private static func clampedMenuBarLyricsWidth(_ value: Double) -> Double {
+    static func clampedMenuBarLyricsWidth(_ value: Double) -> Double {
         min(760.0, max(40.0, value == 0 ? 220.0 : value))
     }
 }

@@ -191,38 +191,6 @@ enum DesktopLyricsParser {
         return normalized(merged)
     }
 
-    static func currentLine(in lines: [DesktopLyricLine], at elapsedTime: TimeInterval) -> DesktopLyricLine? {
-        currentLineContext(in: lines, at: elapsedTime, trackDuration: nil)?.line
-    }
-
-    static func currentLineContext(
-        in lines: [DesktopLyricLine],
-        at elapsedTime: TimeInterval,
-        trackDuration: TimeInterval?
-    ) -> DesktopLyricLineContext? {
-        guard let index = lineIndex(in: lines, at: elapsedTime) else { return nil }
-        return lineContext(in: lines, index: index, at: elapsedTime, trackDuration: trackDuration)
-    }
-
-    static func lineIndex(in lines: [DesktopLyricLine], at elapsedTime: TimeInterval) -> Int? {
-        guard !lines.isEmpty else { return nil }
-        let safeTime = elapsedTime.isFinite ? max(0, elapsedTime) : 0
-        guard safeTime + 0.001 >= lines[lines.startIndex].time else { return nil }
-        var lower = lines.startIndex
-        var upper = lines.endIndex
-
-        while lower < upper {
-            let mid = lower + (upper - lower) / 2
-            if lines[mid].time <= safeTime {
-                lower = mid + 1
-            } else {
-                upper = mid
-            }
-        }
-
-        return max(lines.startIndex, lower - 1)
-    }
-
     static func lineContext(
         in lines: [DesktopLyricLine],
         index: Int,
@@ -338,7 +306,8 @@ enum DesktopLyricsParser {
         return gap.isFinite && gap > longSilencePlaceholderThreshold
     }
 
-    private static func isSilencePlaceholderText(_ text: String) -> Bool {
+    /// 纯占位符文本判定（仅由 . / … / ⋯ 组成），桌面歌词三处共用。
+    static func isSilencePlaceholderText(_ text: String) -> Bool {
         let compact = text
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: " ", with: "")

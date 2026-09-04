@@ -11,6 +11,9 @@ struct FaceAttentionResult: Sendable {
 }
 
 enum FaceAttentionAnalyzer {
+    /// 复用同一个请求实例（Vision 请求可重复执行；分析已串行化，无并发竞争）。
+    private static let faceRequest = VNDetectFaceLandmarksRequest()
+
     private enum Metrics {
         static let minimumFaceWidth: CGFloat = 0.08
         static let minimumFaceHeight: CGFloat = 0.08
@@ -81,7 +84,7 @@ enum FaceAttentionAnalyzer {
     }
 
     private static func performFaceRequest(pixelBuffer: CVPixelBuffer, quality: FrameQuality, enhancedForLowLight: Bool) -> FaceObservation? {
-        let request = VNDetectFaceLandmarksRequest()
+        let request = faceRequest
         let handler: VNImageRequestHandler
 
         if enhancedForLowLight {

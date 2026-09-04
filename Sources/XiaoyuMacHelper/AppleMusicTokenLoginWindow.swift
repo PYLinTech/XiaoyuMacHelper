@@ -3,17 +3,20 @@ import WebKit
 
 @MainActor
 final class AppleMusicTokenLoginWindow: NSWindow, WKNavigationDelegate {
+    private static let windowSize = NSSize(width: 900, height: 680)
+
     private let webView = WKWebView(frame: .zero)
     private let instructionLabel = NSTextField(labelWithString: "请在网页中登录 Apple Music。登录完成后，本窗口会自动提取 media-user-token 并保存到本机。")
     private let checkButton = NSButton(title: "我已登录，立即检测", target: nil, action: nil)
-    private let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 680))
+    private lazy var containerView = NSView(frame: NSRect(origin: .zero, size: Self.windowSize))
     private var tokenCheckTimer: Timer?
+    private var willCloseObserver: NSObjectProtocol?
 
     var onTokenCaptured: ((String) -> Void)?
 
     init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 680),
+            contentRect: NSRect(origin: .zero, size: Self.windowSize),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -29,17 +32,34 @@ final class AppleMusicTokenLoginWindow: NSWindow, WKNavigationDelegate {
 
     func show() {
         makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         startTokenChecking()
     }
 
     override func close() {
         tokenCheckTimer?.invalidate()
         tokenCheckTimer = nil
+        if let willCloseObserver {
+            NotificationCenter.default.removeObserver(willCloseObserver)
+            self.willCloseObserver = nil
+        }
         super.close()
     }
 
     private func setupViews() {
+        // 兜底：任何关闭路径（含红点关闭触发的 performClose）都停掉轮询 Timer。
+        // token 必须留存并在 close() 中移除，否则闭包永久滞留在通知中心。
+        willCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.tokenCheckTimer?.invalidate()
+                self?.tokenCheckTimer = nil
+            }
+        }
+
         containerView.autoresizingMask = [.width, .height]
         contentView = containerView
 
@@ -141,23 +161,34 @@ final class AppleMusicTokenLoginWindow: NSWindow, WKNavigationDelegate {
         })();
         """
 
-        webView.evaluateJavaScript(script) { [weak self] value, _ in
-            guard let self, let text = value as? String,
-                  let data = text.data(using: .utf8),
-                  let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                return
+        // macOS 13 起 evaluateJavaScript(_:completionHandler:) 已废弃，改用带 contentWorld 的新 API。
+        webView.evaluateJavaScript(script, in: nil, in: .page) { [weak self] result in
+            switch result {
+            case let .success(value):
+                self?.handleCapturedTokenJSON(value)
+            case .failure:
+                // 轮询探测场景：页面尚未就绪/脚本异常时静默跳过，等待下一轮。
+                break
             }
-
-            let token = items
-                .compactMap { $0["value"] as? String }
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .first { $0.count > 40 && !$0.contains("{") && !$0.contains("}") }
-
-            guard let token, !token.isEmpty else { return }
-            self.tokenCheckTimer?.invalidate()
-            self.tokenCheckTimer = nil
-            self.onTokenCaptured?(token)
-            self.close()
         }
+    }
+
+    private func handleCapturedTokenJSON(_ value: Any?) {
+        guard let text = value as? String,
+              let data = text.data(using: .utf8),
+              let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return
+        }
+
+        let token = items
+            .compactMap { $0["value"] as? String }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { $0.count > 40 && !$0.contains("{") && !$0.contains("}") }
+
+        guard let token, !token.isEmpty else { return }
+        tokenCheckTimer?.invalidate()
+        tokenCheckTimer = nil
+        onTokenCaptured?(token)
+        close()
     }
 }

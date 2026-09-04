@@ -63,10 +63,6 @@ final class DesktopLyricsWindow: FloatingOverlayPanel {
         }
     }
 
-    func show(message: String) {
-        show(primary: message, translation: nil, showsTranslation: false)
-    }
-
     func show(
         primary: String,
         translation: String?,

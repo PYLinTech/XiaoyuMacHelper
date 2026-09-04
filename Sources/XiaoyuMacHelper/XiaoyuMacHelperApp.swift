@@ -20,6 +20,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private lazy var selectionToolbarController = SelectionToolbarController(settings: currentSettings)
     private lazy var activeVisionController = ActiveVisionController(settings: currentSettings)
     private lazy var desktopLyricsController = DesktopLyricsController(settings: currentSettings)
+    private lazy var slideshowAnnotationController = SlideshowAnnotationController(settings: currentSettings)
     private lazy var controlWindow = ControlWindow()
     private var pollTimer: Timer?
     private var statusPollTimer: Timer?
@@ -29,6 +30,10 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private var didBecomeActiveObserver: NSObjectProtocol?
     private var appleMusicTokenLoginWindow: AppleMusicTokenLoginWindow?
     private var lastRenderedControlState: ControlState?
+    /// 登录项状态缓存：SMAppService.status 每次查询可能走 launchd XPC，
+    /// 控制窗聚焦时 0.2s 轮询一次纯属浪费。仅在勾选切换、显示窗口、窗口
+    /// 获得焦点等状态变化点刷新（见 refreshLoginItemStatus）。
+    private var cachedIsLoginItemEnabled = false
     private var previousCapsLockState: Bool?
     private var isUpdateCheckInProgress = false
     private var updateAlertWindow: UpdateAlertWindow?
@@ -41,14 +46,18 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        refreshLoginItemStatus()
         bindCallbacks()
         setupObservers()
         selectionToolbarController.start()
+        // 放映批注的截图工具复用选区截图的完整链路（同一实例）。
+        slideshowAnnotationController.screenshotToolbar = selectionToolbarController
         activeVisionController.start()
         desktopLyricsController.start()
+        slideshowAnnotationController.start()
         updateCapsLockPolling()
         updateCapsLockWindow(force: true)
-        if launchMode.showsControlWindowOnLaunch {
+        if launchMode.isUserInitiatedLaunch {
             showControlWindow()
         }
         scheduleAutoUpdateCheck()
@@ -56,64 +65,109 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     private func bindCallbacks() {
         capsLockWindow.onClick = { [weak self] in self?.handleCapsLockIndicatorClick() }
-        controlWindow.onCapsLockIndicatorChanged = { [weak self] isEnabled in self?.setCapsLockIndicatorEnabled(isEnabled) }
-        controlWindow.onClickToDisableChanged = { [weak self] isEnabled in self?.setClickToDisableEnabled(isEnabled) }
-        controlWindow.onSelectionToolbarChanged = { [weak self] isEnabled in self?.setSelectionToolbarEnabled(isEnabled) }
-        controlWindow.onSelectionToolbarHideInFullscreenChanged = { [weak self] isEnabled in self?.setSelectionToolbarHideInFullscreen(isEnabled) }
-        controlWindow.onActiveVisionChanged = { [weak self] isEnabled in self?.setActiveVisionEnabled(isEnabled) }
-        controlWindow.onDesktopLyricsChanged = { [weak self] isEnabled in self?.setDesktopLyricsEnabled(isEnabled) }
-        controlWindow.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.setSelectionToolbarAction(action, enabled: isEnabled) }
-        controlWindow.onSelectionToolbarActionMoved = { [weak self] action, direction in self?.moveSelectionToolbarAction(action, direction: direction) }
-        controlWindow.onDesktopLyricsSourceMoved = { [weak self] source, direction in self?.moveDesktopLyricsSource(source, direction: direction) }
-        controlWindow.onDesktopLyricsSourceEnabledChanged = { [weak self] source, isEnabled in self?.setDesktopLyricsSource(source, enabled: isEnabled) }
-        controlWindow.onDesktopLyricsPreferredLanguageChanged = { [weak self] language in self?.setDesktopLyricsPreferredLanguage(language) }
-        controlWindow.onDesktopLyricsSurfaceChanged = { [weak self] isEnabled in self?.setDesktopLyricsSurfaceEnabled(isEnabled) }
-        controlWindow.onDynamicIslandLyricsChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsEnabled(isEnabled) }
-        controlWindow.onDynamicIslandLyricsSpectrumChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsSpectrumEnabled(isEnabled) }
-        controlWindow.onDynamicIslandLyricsHideOnHoverChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsHideOnHover(isEnabled) }
-        controlWindow.onDesktopLyricsWidthChanged = { [weak self] width in self?.setDesktopLyricsWidth(width) }
-        controlWindow.onDesktopLyricsAlignmentChanged = { [weak self] alignment in self?.setDesktopLyricsAlignment(alignment) }
-        controlWindow.onDynamicIslandLyricsWidthChanged = { [weak self] width in self?.setDynamicIslandLyricsWidth(width) }
-        controlWindow.onDynamicIslandLyricsBlankWidthChanged = { [weak self] width in self?.setDynamicIslandLyricsBlankWidth(width) }
-        controlWindow.onDynamicIslandLyricsHeightChanged = { [weak self] height in self?.setDynamicIslandLyricsHeight(height) }
-        controlWindow.onDynamicIslandLyricsSlantRatioChanged = { [weak self] ratio in self?.setDynamicIslandLyricsSlantRatio(ratio) }
-        controlWindow.onDynamicIslandLyricsCornerRatioChanged = { [weak self] ratio in self?.setDynamicIslandLyricsCornerRatio(ratio) }
-        controlWindow.onDynamicIslandLyricsFontSizeChanged = { [weak self] fontSize in self?.setDynamicIslandLyricsFontSize(fontSize) }
-        controlWindow.onDynamicIslandLyricsFontNameChanged = { [weak self] fontName in self?.setDynamicIslandLyricsFontName(fontName) }
-        controlWindow.onDynamicIslandLyricsAlignmentChanged = { [weak self] alignment in self?.setDynamicIslandLyricsAlignment(alignment) }
-        controlWindow.onMenuBarLyricsChanged = { [weak self] isEnabled in self?.setMenuBarLyricsEnabled(isEnabled) }
-        controlWindow.onMenuBarLyricsWidthChanged = { [weak self] width in self?.setMenuBarLyricsWidth(width) }
-        controlWindow.onMenuBarLyricsAlignmentChanged = { [weak self] alignment in self?.setMenuBarLyricsAlignment(alignment) }
-        controlWindow.onDesktopLyricsShowsTranslationChanged = { [weak self] isEnabled in self?.setDesktopLyricsShowsTranslation(isEnabled) }
-        controlWindow.onDesktopLyricsFontSizeChanged = { [weak self] fontSize in self?.setDesktopLyricsFontSize(fontSize) }
-        controlWindow.onDesktopLyricsLockedChanged = { [weak self] isLocked in self?.setDesktopLyricsLocked(isLocked) }
-        controlWindow.onDesktopLyricsStylePresetChanged = { [weak self] preset in self?.setDesktopLyricsStylePreset(preset) }
-        controlWindow.onDesktopLyricsFontNameChanged = { [weak self] fontName in self?.setDesktopLyricsFontName(fontName) }
-        controlWindow.onDesktopLyricsTextColorChanged = { [weak self] value in self?.setDesktopLyricsTextColor(value) }
-        controlWindow.onDesktopLyricsStrokeColorChanged = { [weak self] value in self?.setDesktopLyricsStrokeColor(value) }
-        controlWindow.onDesktopLyricsStrokeWidthChanged = { [weak self] value in self?.setDesktopLyricsStrokeWidth(value) }
-        controlWindow.onMusicLyricsAppWhitelistChanged = { [weak self] value in self?.setMusicLyricsAppWhitelist(value) }
-        controlWindow.onSearchTemplateChanged = { [weak self] template in self?.setSearchURLTemplate(template) }
-        controlWindow.onScreenshotSaveDirectoryChanged = { [weak self] path in self?.setScreenshotSaveDirectory(path) }
-        controlWindow.onScreenshotCopiesToClipboardChanged = { [weak self] isEnabled in self?.setScreenshotCopiesToClipboard(isEnabled) }
-        controlWindow.onScreenshotSelectsRegionChanged = { [weak self] isEnabled in self?.setScreenshotSelectsRegion(isEnabled) }
-        controlWindow.onActiveVisionGazeChanged = { [weak self] isEnabled in self?.setActiveVisionPreventsDisplaySleepOnGaze(isEnabled) }
-        controlWindow.onActiveVisionFacingChanged = { [weak self] isEnabled in self?.setActiveVisionPreventsDisplaySleepOnFacing(isEnabled) }
-        controlWindow.onActiveVisionNotifyChanged = { [weak self] isEnabled in self?.setActiveVisionNotifyWhenExtendingDisplaySleep(isEnabled) }
-        controlWindow.onAppleMusicLoginRequested = { [weak self] in self?.openAppleMusicLogin() }
-        controlWindow.onAppleMusicTokenCleared = { [weak self] in self?.clearAppleMusicToken() }
-        controlWindow.onLoginItemChanged = { [weak self] isEnabled in self?.setLoginItemEnabled(isEnabled) }
-        controlWindow.onLoginItemGuide = { [weak self] in self?.openLoginItemSettings() }
-        controlWindow.onAccessibilityEnableRequested = { [weak self] in self?.enableAccessibilityGuide() }
-        controlWindow.onAccessibilityDisableRequested = { [weak self] in self?.disableAccessibilityGuide() }
-        controlWindow.onAccessibilityGuide = { [weak self] in self?.openAccessibilitySettings() }
-        controlWindow.onRefreshRequested = { [weak self] in self?.renderControlWindow() }
+        controlWindow.controlView.onCapsLockIndicatorChanged = { [weak self] isEnabled in self?.setCapsLockIndicatorEnabled(isEnabled) }
+        controlWindow.controlView.onClickToDisableChanged = { [weak self] isEnabled in self?.setClickToDisableEnabled(isEnabled) }
+        controlWindow.controlView.onSelectionToolbarChanged = { [weak self] isEnabled in self?.setSelectionToolbarEnabled(isEnabled) }
+        controlWindow.controlView.onSelectionToolbarHideInFullscreenChanged = { [weak self] isEnabled in self?.setSelectionToolbarHideInFullscreen(isEnabled) }
+        controlWindow.controlView.onActiveVisionChanged = { [weak self] isEnabled in self?.setActiveVisionEnabled(isEnabled) }
+        controlWindow.controlView.onDesktopLyricsChanged = { [weak self] isEnabled in self?.setDesktopLyricsEnabled(isEnabled) }
+        controlWindow.controlView.onSlideshowAnnotationChanged = { [weak self] isEnabled in self?.setSlideshowAnnotationEnabled(isEnabled) }
+        controlWindow.controlView.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.setSelectionToolbarAction(action, enabled: isEnabled) }
+        controlWindow.controlView.onSelectionToolbarActionMoved = { [weak self] action, direction in self?.moveSelectionToolbarAction(action, direction: direction) }
+        controlWindow.controlView.onDesktopLyricsSourceMoved = { [weak self] source, direction in self?.moveDesktopLyricsSource(source, direction: direction) }
+        controlWindow.controlView.onDesktopLyricsSourceEnabledChanged = { [weak self] source, isEnabled in self?.setDesktopLyricsSource(source, enabled: isEnabled) }
+        controlWindow.controlView.onDesktopLyricsPreferredLanguageChanged = { [weak self] language in self?.setDesktopLyricsPreferredLanguage(language) }
+        controlWindow.controlView.onDesktopLyricsSurfaceChanged = { [weak self] isEnabled in self?.setDesktopLyricsSurfaceEnabled(isEnabled) }
+        controlWindow.controlView.onDynamicIslandLyricsChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsEnabled(isEnabled) }
+        controlWindow.controlView.onDynamicIslandLyricsSpectrumChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsSpectrumEnabled(isEnabled) }
+        controlWindow.controlView.onDynamicIslandLyricsHideOnHoverChanged = { [weak self] isEnabled in self?.setDynamicIslandLyricsHideOnHover(isEnabled) }
+        controlWindow.controlView.onDesktopLyricsWidthChanged = { [weak self] width in self?.setDesktopLyricsWidth(width) }
+        controlWindow.controlView.onDesktopLyricsAlignmentChanged = { [weak self] alignment in self?.setDesktopLyricsAlignment(alignment) }
+        controlWindow.controlView.onDynamicIslandLyricsWidthChanged = { [weak self] width in self?.setDynamicIslandLyricsWidth(width) }
+        controlWindow.controlView.onDynamicIslandLyricsBlankWidthChanged = { [weak self] width in self?.setDynamicIslandLyricsBlankWidth(width) }
+        controlWindow.controlView.onDynamicIslandLyricsHeightChanged = { [weak self] height in self?.setDynamicIslandLyricsHeight(height) }
+        controlWindow.controlView.onDynamicIslandLyricsSlantRatioChanged = { [weak self] ratio in self?.setDynamicIslandLyricsSlantRatio(ratio) }
+        controlWindow.controlView.onDynamicIslandLyricsCornerRatioChanged = { [weak self] ratio in self?.setDynamicIslandLyricsCornerRatio(ratio) }
+        controlWindow.controlView.onDynamicIslandLyricsFontSizeChanged = { [weak self] fontSize in self?.setDynamicIslandLyricsFontSize(fontSize) }
+        controlWindow.controlView.onDynamicIslandLyricsFontNameChanged = { [weak self] fontName in self?.setDynamicIslandLyricsFontName(fontName) }
+        controlWindow.controlView.onDynamicIslandLyricsAlignmentChanged = { [weak self] alignment in self?.setDynamicIslandLyricsAlignment(alignment) }
+        controlWindow.controlView.onMenuBarLyricsChanged = { [weak self] isEnabled in self?.setMenuBarLyricsEnabled(isEnabled) }
+        controlWindow.controlView.onMenuBarLyricsWidthChanged = { [weak self] width in self?.setMenuBarLyricsWidth(width) }
+        controlWindow.controlView.onMenuBarLyricsAlignmentChanged = { [weak self] alignment in self?.setMenuBarLyricsAlignment(alignment) }
+        controlWindow.controlView.onDesktopLyricsShowsTranslationChanged = { [weak self] isEnabled in self?.setDesktopLyricsShowsTranslation(isEnabled) }
+        controlWindow.controlView.onDesktopLyricsFontSizeChanged = { [weak self] fontSize in self?.setDesktopLyricsFontSize(fontSize) }
+        controlWindow.controlView.onDesktopLyricsLockedChanged = { [weak self] isLocked in self?.setDesktopLyricsLocked(isLocked) }
+        controlWindow.controlView.onDesktopLyricsStylePresetChanged = { [weak self] preset in self?.setDesktopLyricsStylePreset(preset) }
+        controlWindow.controlView.onDesktopLyricsFontNameChanged = { [weak self] fontName in self?.setDesktopLyricsFontName(fontName) }
+        controlWindow.controlView.onDesktopLyricsTextColorChanged = { [weak self] value in self?.setDesktopLyricsTextColor(value) }
+        controlWindow.controlView.onDesktopLyricsStrokeColorChanged = { [weak self] value in self?.setDesktopLyricsStrokeColor(value) }
+        controlWindow.controlView.onDesktopLyricsStrokeWidthChanged = { [weak self] value in self?.setDesktopLyricsStrokeWidth(value) }
+        controlWindow.controlView.onMusicLyricsAppWhitelistChanged = { [weak self] value in self?.setMusicLyricsAppWhitelist(value) }
+        controlWindow.controlView.onSearchTemplateChanged = { [weak self] template in self?.setSearchURLTemplate(template) }
+        controlWindow.controlView.onScreenshotSaveDirectoryChanged = { [weak self] path in self?.setScreenshotSaveDirectory(path) }
+        controlWindow.controlView.onScreenshotCopiesToClipboardChanged = { [weak self] isEnabled in self?.setScreenshotCopiesToClipboard(isEnabled) }
+        controlWindow.controlView.onScreenshotSelectsRegionChanged = { [weak self] isEnabled in self?.setScreenshotSelectsRegion(isEnabled) }
+        controlWindow.controlView.onActiveVisionGazeChanged = { [weak self] isEnabled in self?.setActiveVisionPreventsDisplaySleepOnGaze(isEnabled) }
+        controlWindow.controlView.onActiveVisionFacingChanged = { [weak self] isEnabled in self?.setActiveVisionPreventsDisplaySleepOnFacing(isEnabled) }
+        controlWindow.controlView.onActiveVisionNotifyChanged = { [weak self] isEnabled in self?.setActiveVisionNotifyWhenExtendingDisplaySleep(isEnabled) }
+        controlWindow.controlView.onAppleMusicLoginRequested = { [weak self] in self?.openAppleMusicLogin() }
+        controlWindow.controlView.onAppleMusicTokenCleared = { [weak self] in self?.clearAppleMusicToken() }
+        controlWindow.controlView.onLoginItemChanged = { [weak self] isEnabled in self?.setLoginItemEnabled(isEnabled) }
+        controlWindow.controlView.onLoginItemGuide = { [weak self] in self?.openLoginItemSettings() }
+        controlWindow.controlView.onAccessibilityEnableRequested = { [weak self] in self?.enableAccessibilityGuide() }
+        controlWindow.controlView.onAccessibilityDisableRequested = { [weak self] in self?.disableAccessibilityGuide() }
+        controlWindow.controlView.onAccessibilityGuide = { [weak self] in self?.openAccessibilitySettings() }
+        controlWindow.onRefreshRequested = { [weak self] in
+            // 窗口获得焦点：先刷新登录项缓存（用户可能在系统设置里改过），再渲染。
+            self?.refreshLoginItemStatus()
+            self?.renderControlWindow()
+        }
         controlWindow.onFocusChanged = { [weak self] isFocused in self?.updateStatusPolling(isFocused: isFocused) }
         controlWindow.onHidden = { [weak self] in self?.stopStatusPolling() }
-        controlWindow.onClearDataAndQuit = { [weak self] in self?.clearDataAndQuit() }
-        controlWindow.onQuit = { NSApp.terminate(nil) }
-        controlWindow.onCheckUpdateRequested = { [weak self] in self?.checkForUpdates(userInitiated: true) }
+        controlWindow.controlView.onClearDataAndQuit = { [weak self] in self?.clearDataAndQuit() }
+        controlWindow.controlView.onQuit = { NSApp.terminate(nil) }
+        controlWindow.controlView.onCheckUpdateRequested = { [weak self] in self?.checkForUpdates(userInitiated: true) }
         desktopLyricsController.onPositionChanged = { [weak self] origin in self?.setDesktopLyricsPosition(origin) }
+        // 幻灯片批注（WPS 加载项）仅在勾选切换时安装/卸载。顺序：先弹窗告知
+        // （用户点「知道了」确认）才写 WPS 目录——跨容器访问会触发系统授权
+        // 弹窗，必须让用户先知道会发生什么；安装失败回滚开关并告警。
+        slideshowAnnotationController.onEnableNoticeRequested = { [weak self] in
+            self?.requestSlideshowAnnotationEnable()
+        }
+        slideshowAnnotationController.onEnableFailed = { [weak self] reason in
+            self?.revertSlideshowAnnotationEnableFailure(reason)
+        }
+    }
+
+    /// 幻灯片插件提示语（单一来源）：勾选启用与启动脚本更新共用，不重复维护。
+    private static let slideshowAddinNoticeMessage =
+        "当前仅支持 WPS：请点击允许访问其他APP的数据，并在重启 WPS 后信任插件。"
+
+    /// 启用第一步：弹窗告知（模态，点「知道了」返回后）才执行第二步写 WPS 目录。
+    private func requestSlideshowAnnotationEnable() {
+        AlertPresenter.show(title: "启用幻灯片批注", message: Self.slideshowAddinNoticeMessage)
+        slideshowAnnotationController.performEnableInstall()
+    }
+
+    /// 脚本更新检查 + 提示（整体在自更新检查链路结束后执行）：
+    /// 仅勾选开启才检查（控制器内守卫）；先只比对版本记录（零权限请求），
+    /// 检出更新先弹窗告知，用户确认后才重装脚本（写 WPS 目录触发授权请求）。
+    private func checkSlideshowAddinScriptUpdate() {
+        guard slideshowAnnotationController.isScriptUpdatePending() else { return }
+        AlertPresenter.show(title: "幻灯片插件需要更新", message: Self.slideshowAddinNoticeMessage)
+        slideshowAnnotationController.performScriptUpdate()
+    }
+
+    /// 幻灯片批注启用失败（插件写盘失败等）：回滚勾选并提示原因。
+    private func revertSlideshowAnnotationEnableFailure(_ reason: String) {
+        settingsStore.setSlideshowAnnotationEnabled(false)
+        currentSettings.isSlideshowAnnotationEnabled = false
+        renderControlWindow(force: true)
+        AlertPresenter.show(
+            title: "无法启用幻灯片批注",
+            message: "WPS 加载项安装失败：\(reason)",
+            style: .warning
+        )
     }
 
     private func clearDataAndQuit() {
@@ -145,10 +199,12 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         do {
             payload = try await UpdateChecker.checkLatest()
         } catch {
-            // 自动检查失败静默；手动点击"检查更新"失败才走网页兜底。
+            // 自动检查失败静默（无网络等），不打扰用户；手动点击"检查更新"失败
+            // 才走网页兜底。失败同样视为自更新检查结束，继续插件脚本检查。
             if userInitiated {
                 presentUpdateFailure(pageURL: UpdateChannel.fallbackReleaseURL, reason: error.localizedDescription)
             }
+            checkSlideshowAddinScriptUpdate()
             return
         }
 
@@ -162,6 +218,8 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
                     message: "当前 v\(UpdateChecker.localVersion?.description ?? "") 已是最新版本。"
                 )
             }
+            // 自更新为最新：立即执行插件脚本检查。
+            checkSlideshowAddinScriptUpdate()
             return
         }
 
@@ -170,7 +228,8 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     /// 弹出自绘更新确认窗（图标 + 更新日志 + 版本对比 + 立即更新/稍后）。
     private func presentUpdatePrompt(payload: UpdatePayload, local: Version, remote: Version) {
-        updateAlertWindow?.close()
+        // 关旧窗不能走 close()：那会触发旧窗 onLater 的脚本检查，造成重复执行。
+        updateAlertWindow?.forceClose()
         updateAlertWindow = nil
 
         let notes = payload.body.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -184,6 +243,8 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         }
         window.onLater = { [weak self] in
             self?.updateAlertWindow = nil
+            // 自更新弹窗结束（用户选择稍后）：执行插件脚本检查。
+            self?.checkSlideshowAddinScriptUpdate()
         }
         updateAlertWindow = window
         window.show()
@@ -205,21 +266,22 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
             }
             alertWindow.setProgress(1)
             alertWindow.setStatus("正在校验并安装更新包…")
-            let stagedApp = try await Task.detached(priority: .userInitiated) {
+            try await Task.detached(priority: .userInitiated) {
                 let staged = try UpdateInstaller.extractApp(fromDMG: dmgURL)
                 let targetApp = Bundle.main.bundleURL
                 guard UpdateInstaller.verify(newApp: staged, targetApp: targetApp) else {
                     throw UpdateError.verificationFailed
                 }
                 try UpdateInstaller.launchUpdater(newApp: staged, targetApp: targetApp)
-                return staged
             }.value
-            _ = stagedApp
             NSApp.terminate(nil)
         } catch {
             updateAlertWindow?.forceClose()
             updateAlertWindow = nil
             presentUpdateFailure(pageURL: payload.fallbackHTMLURL, reason: error.localizedDescription)
+            // 安装失败仍停留在旧版本：视为自更新链路结束，继续插件脚本检查
+            // （检查自身有 isScriptUpdatePending 闸门，与其它路径重复调用安全）。
+            checkSlideshowAddinScriptUpdate()
         }
     }
 
@@ -242,12 +304,14 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         removeEventMonitor(&globalFlagsMonitor)
         removeEventMonitor(&localFlagsMonitor)
         if let didBecomeActiveObserver { NotificationCenter.default.removeObserver(didBecomeActiveObserver) }
+        DistributedNotificationCenter.default().removeObserver(self)
         pollTimer?.invalidate()
         pollTimer = nil
         stopStatusPolling()
         selectionToolbarController.stop()
         activeVisionController.stop()
         desktopLyricsController.stop()
+        slideshowAnnotationController.stop()
         instanceLock.releaseLock()
     }
 
@@ -269,7 +333,10 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     private func handleAccessibilityAction(title: String, message: String, action: () -> Void) {
         renderControlWindow(force: true)
-        guard AlertPresenter.confirm(title: title, message: message) else { return renderControlWindow(force: true) }
+        guard AlertPresenter.confirm(title: title, message: message) else {
+            renderControlWindow(force: true)
+            return
+        }
         action()
         renderControlWindow(force: true)
     }
@@ -293,6 +360,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
             )
         }
 
+        refreshLoginItemStatus()
         openLoginItemSettings()
         renderControlWindow(force: true)
     }
@@ -340,15 +408,21 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showControlWindow() {
+        refreshLoginItemStatus()
         renderControlWindow(force: true)
         controlWindow.show()
         updateStatusPolling(isFocused: controlWindow.isKeyWindow)
     }
 
+    /// 登录项状态变化点统一走这里刷新缓存（勾选切换 / 显示窗口 / 窗口获焦）。
+    private func refreshLoginItemStatus() {
+        cachedIsLoginItemEnabled = LoginItemManager.isInstalled()
+    }
+
     private func renderControlWindow(force: Bool = false) {
         let state = ControlState(
             settings: currentSettings,
-            isLoginItemEnabled: LoginItemManager.isInstalled(),
+            isLoginItemEnabled: cachedIsLoginItemEnabled,
             isAccessibilityEnabled: AccessibilityPermission.isTrusted()
         )
 
@@ -512,7 +586,24 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         refreshDesktopLyricsSettings()
     }
 
+    private func setSlideshowAnnotationEnabled(_ isEnabled: Bool) {
+        settingsStore.setSlideshowAnnotationEnabled(isEnabled)
+        currentSettings.isSlideshowAnnotationEnabled = isEnabled
+        renderControlWindow(force: true)
+        slideshowAnnotationController.update(settings: currentSettings)
+    }
+
     private func openAppleMusicLogin() {
+        // 防重入：已有登录窗口时直接前置，避免覆盖唯一引用导致新旧窗口状态互踩。
+        if let existingWindow = appleMusicTokenLoginWindow {
+            if existingWindow.isVisible {
+                existingWindow.makeKeyAndOrderFront(nil)
+                NSApp.activate()
+                return
+            }
+            appleMusicTokenLoginWindow = nil
+        }
+
         let loginWindow = AppleMusicTokenLoginWindow()
         loginWindow.onTokenCaptured = { [weak self] token in
             Task { @MainActor [weak self] in
@@ -561,7 +652,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     private func setDynamicIslandLyricsSpectrumEnabled(_ isEnabled: Bool) {
         if isEnabled {
-            let hasPermission = SystemAudioSpectrumMonitor.hasCapturePermission() || SystemAudioSpectrumMonitor.requestCapturePermission()
+            let hasPermission = ScreenRecordingPermission.isAuthorized || ScreenRecordingPermission.request()
             guard hasPermission else {
                 settingsStore.setDynamicIslandLyricsSpectrumEnabled(false)
                 currentSettings.isDynamicIslandLyricsSpectrumEnabled = false
@@ -588,15 +679,17 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         alert.alertStyle = .informational
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "稍后")
-        if alert.runModal() == .alertFirstButtonReturn,
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
+        if alert.runModal() == .alertFirstButtonReturn {
+            SystemSettingsOpener.openScreenRecordingPrivacy()
         }
     }
 
+    // 以下数值 setter 统一模式：写 store 后 read() 回读（clamp/默认值单一来源
+    // 在 SettingsStore），不再手写 min/max 双份边界。
+
     private func setDesktopLyricsWidth(_ width: Double) {
         settingsStore.setDesktopLyricsWidth(width)
-        currentSettings.desktopLyricsWidth = min(2200.0, max(260.0, width))
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
@@ -608,37 +701,37 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     private func setDynamicIslandLyricsWidth(_ width: Double) {
         settingsStore.setDynamicIslandLyricsWidth(width)
-        currentSettings.dynamicIslandLyricsWidth = min(1700.0, max(360.0, width))
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
     private func setDynamicIslandLyricsBlankWidth(_ width: Double) {
         settingsStore.setDynamicIslandLyricsBlankWidth(width)
-        currentSettings.dynamicIslandLyricsBlankWidth = min(900.0, max(60.0, width))
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
     private func setDynamicIslandLyricsHeight(_ height: Double) {
         settingsStore.setDynamicIslandLyricsHeight(height)
-        currentSettings.dynamicIslandLyricsHeight = min(180.0, max(32.0, height))
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
     private func setDynamicIslandLyricsSlantRatio(_ ratio: Double) {
         settingsStore.setDynamicIslandLyricsSlantRatio(ratio)
-        currentSettings.dynamicIslandLyricsSlantRatio = min(1.0, max(0.01, ratio))
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
     private func setDynamicIslandLyricsCornerRatio(_ ratio: Double) {
         settingsStore.setDynamicIslandLyricsCornerRatio(ratio)
-        currentSettings.dynamicIslandLyricsCornerRatio = min(1.0, max(0.01, ratio))
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
     private func setDynamicIslandLyricsFontSize(_ fontSize: Double) {
         let previousFontSize = currentSettings.dynamicIslandLyricsFontSize
-        let clampedFontSize = min(64.0, max(11.0, fontSize))
+        let clampedFontSize = SettingsStore.clampedDynamicIslandLyricsFontSize(fontSize)
         settingsStore.setDynamicIslandLyricsFontSize(clampedFontSize)
         currentSettings.dynamicIslandLyricsFontSize = clampedFontSize
 
@@ -658,7 +751,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     }
 
     private static func suggestedDynamicIslandLyricsHeight(forFontSize fontSize: Double) -> Double {
-        let clampedFontSize = min(64.0, max(11.0, fontSize))
+        let clampedFontSize = SettingsStore.clampedDynamicIslandLyricsFontSize(fontSize)
         guard clampedFontSize > 24.0 else { return 58.0 }
         return min(180.0, max(58.0, ceil(58.0 + (clampedFontSize - 24.0) * 1.55)))
     }
@@ -683,7 +776,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     private func setMenuBarLyricsWidth(_ width: Double) {
         settingsStore.setMenuBarLyricsWidth(width)
-        currentSettings.menuBarLyricsWidth = min(760.0, max(40.0, width))
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
@@ -701,7 +794,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
     private func setDesktopLyricsFontSize(_ fontSize: Double) {
         settingsStore.setDesktopLyricsFontSize(fontSize)
-        currentSettings.desktopLyricsFontSize = min(48.0, max(18.0, fontSize))
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
@@ -712,11 +805,9 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     }
 
     private func setDesktopLyricsStylePreset(_ preset: DesktopLyricsStylePreset) {
+        // 预设重置（清空自定义色/描边）由 store 单侧完成，回读即可，不再双写。
         settingsStore.setDesktopLyricsStylePreset(preset)
-        currentSettings.desktopLyricsStylePreset = preset
-        currentSettings.desktopLyricsTextColor = ""
-        currentSettings.desktopLyricsStrokeColor = ""
-        currentSettings.desktopLyricsStrokeWidth = -1.0
+        currentSettings = settingsStore.read()
         refreshDesktopLyricsSettings()
     }
 
@@ -778,26 +869,19 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
 
         guard ScreenRecordingPermission.isAuthorized else {
             applySelectionToolbarAction(.screenshot, enabled: false)
-            AlertPresenter.show(
+            // 注意：首次 request() 只会弹出系统授权框并立即同步返回 false，
+            // 并不代表被拒。因此这里不依据返回值二次判定，仅弹系统授权框 +
+            // 给出指引，用户授权后重新勾选即可生效。
+            ScreenRecordingPermission.request()
+            let response = AlertPresenter.show(
                 title: "需要录屏权限",
-                message: "截图功能需要屏幕录制权限才能读取屏幕内容。点击“知道了”后将向系统申请权限。",
-                style: .warning
+                message: "截图功能需要屏幕录制权限。请在系统弹窗中允许；若此前已拒绝，请在系统设置的“隐私与安全性 > 屏幕录制”中允许后重新勾选截图。",
+                style: .warning,
+                buttons: ["打开设置", "取消"]
             )
 
-            if ScreenRecordingPermission.request() {
-                applySelectionToolbarAction(.screenshot, enabled: true)
-            } else {
-                applySelectionToolbarAction(.screenshot, enabled: false)
-                let response = AlertPresenter.show(
-                    title: "无法开启截图",
-                    message: "请在系统设置的“隐私与安全性 > 屏幕录制”中允许 Xiaoyu MacHelper，然后重新勾选截图。",
-                    style: .warning,
-                    buttons: ["打开设置", "取消"]
-                )
-
-                if response == .alertFirstButtonReturn {
-                    ScreenRecordingPermission.openSettings()
-                }
+            if response == .alertFirstButtonReturn {
+                ScreenRecordingPermission.openSettings()
             }
             return
         }

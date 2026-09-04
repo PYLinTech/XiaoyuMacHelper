@@ -1,6 +1,13 @@
 import AppKit
 import Carbon
 
+/// 截图链路窗口统一层级：选区覆盖层、确认工具条、批注窗（含色板/粗细浮层）
+/// 全部使用同一顶层——远高于放映批注的 chrome 层（screenSaver + 2），
+/// 保证截图相关界面永远处于最前、不被任何放映浮层压住。
+enum ScreenshotWindowLevel {
+    static let screenshot = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 10)
+}
+
 @MainActor
 final class ScreenshotSelectionWindow: NSPanel {
     private let selectionView = ScreenshotSelectionView()
@@ -18,7 +25,7 @@ final class ScreenshotSelectionWindow: NSPanel {
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
         canHide = false
-        level = .screenSaver
+        level = ScreenshotWindowLevel.screenshot
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         backgroundColor = .black
         isOpaque = true
@@ -32,7 +39,6 @@ final class ScreenshotSelectionWindow: NSPanel {
     }
 
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
 
     func show(
         image: CGImage,
@@ -63,6 +69,10 @@ final class ScreenshotSelectionWindow: NSPanel {
                 screenSize: screenFrame.size,
                 imageSize: NSSize(width: image.width, height: image.height)
             )
+            // 选区层与批注层同层级：显式收起选区层再显示批注层，保证批注
+            // 界面真实置前（否则批注窗可能被同层的选区层压住——表现为点了
+            // 「批注」没反应、取消选区后才看到批注页）。
+            self.orderOut(nil)
             self.annotationWindow.show(
                 image: image,
                 selection: imageSelection,
@@ -74,7 +84,10 @@ final class ScreenshotSelectionWindow: NSPanel {
                 },
                 onCancel: { [weak self] in
                     guard let self else { return }
+                    // 从批注返回选区编辑：选区状态仍在视图里，恢复置前并
+                    // 夺回键盘（Esc/方向键微调可用），再定位确认工具条。
                     self.orderFrontRegardless()
+                    self.makeKey()
                     self.positionActionToolbar(self.selectionView.actionBarFrame, screenFrame: screenFrame)
                 }
             )
@@ -111,6 +124,13 @@ final class ScreenshotSelectionWindow: NSPanel {
     }
 
     private func dismissSelectionOverlay() {
+        // 释放动作工具条的回调（onFullScreen 等强捕获整屏截图），
+        // 避免会话结束后图像滞留在长生命周期的窗口上。
+        actionToolbarWindow.onFullScreen = nil
+        actionToolbarWindow.onConfirm = nil
+        actionToolbarWindow.onCancel = nil
+        actionToolbarWindow.onAnnotate = nil
+        selectionView.releaseSessionResources()
         actionToolbarWindow.orderOut(nil)
         orderOut(nil)
     }
@@ -179,11 +199,6 @@ final class ScreenshotSelectionView: NSView {
         static let handleRadius: CGFloat = 10
         static let handleHitRadius: CGFloat = 28
         static let actionBarHeight: CGFloat = 38
-        static let actionBarPadding: CGFloat = 6
-        static let actionBarGap: CGFloat = 6
-        static let actionBarCornerRadius: CGFloat = 10
-        static let actionButtonHeight: CGFloat = 28
-        static let actionButtonWidth: CGFloat = 58
         static let confirmGap: CGFloat = 12
 
         static var actionBarWidth: CGFloat {
@@ -350,11 +365,11 @@ final class ScreenshotSelectionView: NSView {
 
     var actionBarFrame: NSRect {
         let preferredX = selection.maxX - Metrics.actionBarWidth
-        let preferredY = selection.minY - Metrics.confirmGap - Metrics.actionBarHeight
         let x = min(max(preferredX, bounds.minX + 8), bounds.maxX - Metrics.actionBarWidth - 8)
-        let y = preferredY >= bounds.minY + 8
-            ? preferredY
-            : min(selection.maxY + Metrics.confirmGap, bounds.maxY - Metrics.actionBarHeight - 8)
+        // 始终放选区下方：下方放不下（选区贴近屏幕底部）时贴屏幕底缘，
+        // 不再翻到选区上方占用选区内部（避免遮住截图内容）。
+        let preferredY = selection.minY - Metrics.confirmGap - Metrics.actionBarHeight
+        let y = max(preferredY, bounds.minY + 8)
         return NSRect(
             origin: NSPoint(x: x, y: y),
             size: NSSize(width: Metrics.actionBarWidth, height: Metrics.actionBarHeight)
@@ -469,17 +484,31 @@ final class ScreenshotSelectionView: NSView {
     }
 
     private func confirm(selection selectedRect: NSRect) {
+        // 先取出回调再清理：clearImage 会把回调置 nil（防图像滞留），
+        // 若直接调用字段将永远为空，确认/取消链路失效。
+        let onConfirm = self.onConfirm
         clearImage()
         onConfirm?(selectedRect)
     }
 
     func cancel() {
+        let onCancel = self.onCancel
         clearImage()
         onCancel?()
     }
 
+    /// 非 confirm/cancel 终态（如批注保存）路径下由外层调用，
+    /// 释放图像与回调，避免整屏截图滞留在长期复用的视图上。
+    func releaseSessionResources() {
+        clearImage()
+    }
+
     private func clearImage() {
+        // 会话结束后窗口会被长期复用，回调闭包强捕获整屏 CGImage（Retina 下约数十 MB），
+        // 必须连同回调一并释放，否则图像一直滞留到下次截图。
         previewImage = nil
+        onConfirm = nil
+        onCancel = nil
         onActionBarFrameChanged = nil
     }
 }

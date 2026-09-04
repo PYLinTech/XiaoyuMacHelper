@@ -170,7 +170,6 @@ final class LiquidGlassContainerView: NSView {
         didSet {
             oldValue?.removeFromSuperview()
             guard let contentView else { return }
-            contentView.removeFromSuperview()
             #if compiler(>=6.2)
             if #available(macOS 26.0, *), let glass = backingView as? NSGlassEffectContainerView {
                 glass.contentView = contentView

@@ -7,9 +7,10 @@ final class PassthroughImageView: NSImageView {
     }
 }
 
+/// 可拖拽排序设置行的基类：统一行尾拖拽把手、命中区、手势光标与上下滑动判定。
 @MainActor
-final class ActionSettingRow: NSView {
-    private enum Metrics {
+class DragReorderableRow: NSView {
+    enum Metrics {
         static let settingsHitSize: CGFloat = 30
         static let settingsGap: CGFloat = 6
         static let dragIconSize: CGFloat = 18
@@ -19,19 +20,73 @@ final class ActionSettingRow: NSView {
         static let dragThreshold: CGFloat = 16
     }
 
+    let dragHandle = PassthroughImageView()
+    private var dragStartWindowY: CGFloat?
+
+    var dragHitFrame: NSRect {
+        dragHandle.frame.insetBy(dx: Metrics.dragHitInsetX, dy: -Metrics.dragHitInsetY)
+    }
+
+    /// 子类在 init 中调用：安装行尾拖拽把手。
+    func installDragHandle() {
+        let dragImage = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "拖动") ?? NSImage()
+        dragImage.isTemplate = true
+        dragHandle.image = dragImage
+        dragHandle.imageScaling = .scaleProportionallyDown
+        dragHandle.contentTintColor = .secondaryLabelColor
+        addSubview(dragHandle)
+    }
+
+    /// 子类在 layout 中调用：把手固定在行尾垂直居中。
+    func layoutDragHandle(in bounds: NSRect) {
+        dragHandle.frame = NSRect(
+            x: bounds.maxX - Metrics.dragRightInset,
+            y: bounds.midY - Metrics.dragIconSize / 2,
+            width: Metrics.dragIconSize,
+            height: Metrics.dragIconSize
+        )
+    }
+
+    /// 拖拽判定通过后回调（上移 direction=-1，下移 direction=1）。
+    func performDragMove(direction: Int) {}
+
+    override func resetCursorRects() {
+        addCursorRect(dragHitFrame, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let localPoint = convert(event.locationInWindow, from: nil)
+        guard dragHitFrame.contains(localPoint) else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        dragStartWindowY = event.locationInWindow.y
+        NSCursor.closedHand.set()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let dragStartWindowY else { return }
+        defer {
+            self.dragStartWindowY = nil
+            NSCursor.openHand.set()
+        }
+
+        let delta = event.locationInWindow.y - dragStartWindowY
+        guard abs(delta) > Metrics.dragThreshold else { return }
+        performDragMove(direction: delta > 0 ? -1 : 1)
+    }
+}
+
+@MainActor
+final class ActionSettingRow: DragReorderableRow {
     let action: ToolbarAction
     private let checkbox: NSButton
     private let settingsButton: IconButtonView?
-    private let dragHandle = PassthroughImageView()
-    private var dragStartWindowY: CGFloat?
 
     var onToggle: ((ToolbarAction, Bool) -> Void)?
     var onMove: ((ToolbarAction, Int) -> Void)?
     var onSettings: ((ToolbarAction) -> Void)?
-
-    private var dragHitFrame: NSRect {
-        dragHandle.frame.insetBy(dx: -Metrics.dragHitInsetX, dy: -Metrics.dragHitInsetY)
-    }
 
     init(action: ToolbarAction, showsSettingsButton: Bool = false) {
         self.action = action
@@ -51,12 +106,7 @@ final class ActionSettingRow: NSView {
             addSubview(settingsButton)
         }
 
-        let dragImage = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "拖动") ?? NSImage()
-        dragImage.isTemplate = true
-        dragHandle.image = dragImage
-        dragHandle.imageScaling = .scaleProportionallyDown
-        dragHandle.contentTintColor = .secondaryLabelColor
-        addSubview(dragHandle)
+        installDragHandle()
     }
 
     required init?(coder: NSCoder) {
@@ -81,39 +131,11 @@ final class ActionSettingRow: NSView {
             )
         }
 
-        dragHandle.frame = NSRect(
-            x: bounds.maxX - Metrics.dragRightInset,
-            y: bounds.midY - Metrics.dragIconSize / 2,
-            width: Metrics.dragIconSize,
-            height: Metrics.dragIconSize
-        )
+        layoutDragHandle(in: bounds)
     }
 
-    override func resetCursorRects() {
-        addCursorRect(dragHitFrame, cursor: .openHand)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let localPoint = convert(event.locationInWindow, from: nil)
-        guard dragHitFrame.contains(localPoint) else {
-            super.mouseDown(with: event)
-            return
-        }
-
-        dragStartWindowY = event.locationInWindow.y
-        NSCursor.closedHand.set()
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard let dragStartWindowY else { return }
-        defer {
-            self.dragStartWindowY = nil
-            NSCursor.openHand.set()
-        }
-
-        let delta = event.locationInWindow.y - dragStartWindowY
-        guard abs(delta) > Metrics.dragThreshold else { return }
-        onMove?(action, delta > 0 ? -1 : 1)
+    override func performDragMove(direction: Int) {
+        onMove?(action, direction)
     }
 
     @objc private func toggled() {
@@ -127,30 +149,15 @@ final class ActionSettingRow: NSView {
 
 
 @MainActor
-final class DesktopLyricsSourceRow: NSView {
-    private enum Metrics {
-        static let settingsHitSize: CGFloat = 30
-        static let dragIconSize: CGFloat = 18
-        static let dragRightInset: CGFloat = 24
-        static let dragHitInsetX: CGFloat = 8
-        static let dragHitInsetY: CGFloat = 13
-        static let dragThreshold: CGFloat = 16
-    }
-
+final class DesktopLyricsSourceRow: DragReorderableRow {
     let source: DesktopLyricsSource
     private let checkbox: NSButton
     private let titleLabel = NSTextField(labelWithString: "")
     private let settingsButton: IconButtonView?
-    private let dragHandle = PassthroughImageView()
-    private var dragStartWindowY: CGFloat?
 
     var onMove: ((DesktopLyricsSource, Int) -> Void)?
     var onSettings: ((DesktopLyricsSource) -> Void)?
     var onToggle: ((DesktopLyricsSource, Bool) -> Void)?
-
-    private var dragHitFrame: NSRect {
-        dragHandle.frame.insetBy(dx: -Metrics.dragHitInsetX, dy: -Metrics.dragHitInsetY)
-    }
 
     init(source: DesktopLyricsSource) {
         self.source = source
@@ -175,12 +182,7 @@ final class DesktopLyricsSourceRow: NSView {
             addSubview(settingsButton)
         }
 
-        let dragImage = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "拖动") ?? NSImage()
-        dragImage.isTemplate = true
-        dragHandle.image = dragImage
-        dragHandle.imageScaling = .scaleProportionallyDown
-        dragHandle.contentTintColor = .secondaryLabelColor
-        addSubview(dragHandle)
+        installDragHandle()
     }
 
     required init?(coder: NSCoder) {
@@ -205,39 +207,11 @@ final class DesktopLyricsSourceRow: NSView {
             )
         }
 
-        dragHandle.frame = NSRect(
-            x: bounds.maxX - Metrics.dragRightInset,
-            y: bounds.midY - Metrics.dragIconSize / 2,
-            width: Metrics.dragIconSize,
-            height: Metrics.dragIconSize
-        )
+        layoutDragHandle(in: bounds)
     }
 
-    override func resetCursorRects() {
-        addCursorRect(dragHitFrame, cursor: .openHand)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let localPoint = convert(event.locationInWindow, from: nil)
-        guard dragHitFrame.contains(localPoint) else {
-            super.mouseDown(with: event)
-            return
-        }
-
-        dragStartWindowY = event.locationInWindow.y
-        NSCursor.closedHand.set()
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard let dragStartWindowY else { return }
-        defer {
-            self.dragStartWindowY = nil
-            NSCursor.openHand.set()
-        }
-
-        let delta = event.locationInWindow.y - dragStartWindowY
-        guard abs(delta) > Metrics.dragThreshold else { return }
-        onMove?(source, delta > 0 ? -1 : 1)
+    override func performDragMove(direction: Int) {
+        onMove?(source, direction)
     }
 
     @objc private func toggled() {

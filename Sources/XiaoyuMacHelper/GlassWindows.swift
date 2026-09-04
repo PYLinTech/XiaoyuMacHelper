@@ -11,6 +11,7 @@ final class CenteredGlassTextView: NSView {
     }
 
     private var cachedText: NSAttributedString?
+    private var cachedMeasuredSize: NSSize?
 
     override var isFlipped: Bool { true }
 
@@ -40,10 +41,15 @@ final class CenteredGlassTextView: NSView {
     }
 
     private func measuredSize() -> NSSize {
-        styledText().boundingRect(
+        if let cachedMeasuredSize {
+            return cachedMeasuredSize
+        }
+        let size = styledText().boundingRect(
             with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         ).size
+        cachedMeasuredSize = size
+        return size
     }
 
     private func styledText() -> NSAttributedString {
@@ -68,6 +74,7 @@ final class CenteredGlassTextView: NSView {
 
     private func invalidateTextLayout() {
         cachedText = nil
+        cachedMeasuredSize = nil
         needsDisplay = true
     }
 }
@@ -153,9 +160,14 @@ final class ToastWindow: GlassTextWindow {
     }
 
     func show(message: String, duration: TimeInterval = 1.6) {
-        dismissWorkItem?.cancel()
         let size = fittingSize(for: message)
-        setFrame(NSRect(origin: bottomCenterOrigin(size: size, bottomInset: Metrics.bottomInset), size: size), display: true)
+        let origin = bottomCenterOrigin(size: size, bottomInset: Metrics.bottomInset)
+        present(message: message, size: size, origin: origin, duration: duration)
+    }
+
+    private func present(message: String, size: NSSize, origin: NSPoint, duration: TimeInterval) {
+        dismissWorkItem?.cancel()
+        setFrame(NSRect(origin: origin, size: size), display: true)
         setMessage(message)
         orderFrontRegardless()
 

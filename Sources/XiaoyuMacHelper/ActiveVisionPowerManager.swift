@@ -29,12 +29,6 @@ final class ActiveVisionPowerManager {
         return holdDisplaySleepAssertion(for: fallbackDuration)
     }
 
-    func releaseExpiredIfNeeded() {
-        let now = Date()
-        displaySleepAssertion.releaseIfExpired(now: now)
-        userActivityAssertion.releaseIfExpired(now: now)
-    }
-
     func releaseAll() {
         displaySleepAssertion.release()
         userActivityAssertion.release()
@@ -49,20 +43,13 @@ final class ActiveVisionPowerManager {
 
     @discardableResult
     private func declareUserActivity() -> Bool {
-        typealias DeclareUserActivityFunction = @convention(c) (CFString, UInt32, UnsafeMutablePointer<IOPMAssertionID>) -> IOReturn
-
-        guard let handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY) else {
-            return false
-        }
-        defer { dlclose(handle) }
-
-        guard let symbol = dlsym(handle, "IOPMAssertionDeclareUserActivity") else {
-            return false
-        }
-
-        let declareUserActivity = unsafeBitCast(symbol, to: DeclareUserActivityFunction.self)
+        // macOS 10.12+ 公开 API，直接静态调用（无需 dlopen/dlsym 动态查找）。
         var assertionID = IOPMAssertionID(0)
-        let result = declareUserActivity(Metrics.assertionReason as CFString, 1, &assertionID)
+        let result = IOPMAssertionDeclareUserActivity(
+            Metrics.assertionReason as CFString,
+            kIOPMUserActiveLocal,
+            &assertionID
+        )
         guard result == kIOReturnSuccess else {
             return false
         }
@@ -94,7 +81,6 @@ final class ActiveVisionPowerManager {
 private final class PowerAssertionToken {
     private var assertionID = IOPMAssertionID(0)
     private var releaseTimer: Timer?
-    private var deadlineDate: Date?
 
     func hold(_ newAssertionID: IOPMAssertionID, duration: TimeInterval) {
         release()
@@ -109,7 +95,6 @@ private final class PowerAssertionToken {
 
         let holdDuration = max(duration, 1)
         assertionID = newAssertionID
-        deadlineDate = Date().addingTimeInterval(holdDuration)
 
         let timer = Timer(timeInterval: holdDuration, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -120,16 +105,7 @@ private final class PowerAssertionToken {
         releaseTimer = timer
     }
 
-    func releaseIfExpired(now: Date) {
-        guard let deadlineDate, now >= deadlineDate else {
-            return
-        }
-
-        release()
-    }
-
     func release() {
-        deadlineDate = nil
         releaseTimer?.invalidate()
         releaseTimer = nil
 

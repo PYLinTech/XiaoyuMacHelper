@@ -25,9 +25,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         static let defaultFontSize: CGFloat = 15.0
         static let minFontSize: CGFloat = 11.0
         static let maxFontSize: CGFloat = 64.0
-        static let hoverWidthScale: CGFloat = 1.0
-        static let hoverHeightGain: CGFloat = 0
-        static let updateHeightGain: CGFloat = 0
     }
 
     private final class DynamicContinentBackgroundView: NSView {
@@ -78,7 +75,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             let bottom = NSColor(calibratedWhite: 0.000, alpha: isHovering ? 0.990 : 0.958)
             NSGradient(colors: [top, middle, bottom])?.draw(in: bounds, angle: -90)
 
-            drawNotchSeparation(in: rect)
             drawSubtleGlass(in: rect)
 
             NSGraphicsContext.restoreGraphicsState()
@@ -173,12 +169,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             return path
         }
 
-        private func drawNotchSeparation(in rect: NSRect) {
-            // The blank notch reserve is created by layout, not by visible divider lines.
-            // Drawing an inner rounded rectangle here made the continent look split into panels.
-            _ = rect
-        }
-
         private func drawSubtleGlass(in rect: NSRect) {
             let shine = NSBezierPath()
             shine.move(to: NSPoint(x: rect.minX + Metrics.sideInset + 12, y: rect.maxY - 9))
@@ -196,23 +186,8 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         }
     }
 
-
-
     @MainActor
-    private final class SpectrumDisplayLinkTarget: NSObject {
-        weak var view: CircularSpectrumIconView?
-
-        init(view: CircularSpectrumIconView) {
-            self.view = view
-        }
-
-        @objc func displayLinkDidFire(_ link: CADisplayLink) {
-            view?.displayLinkDidFire(link)
-        }
-    }
-
-    @MainActor
-    private final class CircularSpectrumIconView: NSView {
+    private final class CircularSpectrumIconView: NSView, DisplayLinkResponding {
         var isActive: Bool = false {
             didSet {
                 guard oldValue != isActive else { return }
@@ -236,7 +211,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         private var visualLevels: [CGFloat]
         private var targetLevels: [CGFloat]
         private var activeDisplayLink: CADisplayLink?
-        private var displayLinkTarget: SpectrumDisplayLinkTarget?
+        private var displayLinkTarget: DisplayLinkTarget<CircularSpectrumIconView>?
         private var lastFrameTime: CFTimeInterval = CACurrentMediaTime()
         private var lastRealAudioTime: CFTimeInterval = 0
         private var hasReceivedRealAudio = false
@@ -332,13 +307,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             return result
         }
 
-        func pulse(strength: CGFloat = 0.0) {
-            // Real audio drives the spectrum.  Keep this method as a compatibility hook for
-            // lyric updates, but do not synthesize fake bars from text changes.
-            _ = strength
-        }
-
-        fileprivate func displayLinkDidFire(_ link: CADisplayLink) {
+        func displayLinkDidFire(_ link: CADisplayLink) {
             let now = CACurrentMediaTime()
             let dt = min(1.0 / 24.0, max(1.0 / 240.0, now - lastFrameTime))
             lastFrameTime = now
@@ -427,8 +396,10 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         private func startDisplayDriverIfNeeded() {
             guard activeDisplayLink == nil, window != nil else { return }
             lastFrameTime = CACurrentMediaTime()
-            let target = SpectrumDisplayLinkTarget(view: self)
-            let link = displayLink(target: target, selector: #selector(SpectrumDisplayLinkTarget.displayLinkDidFire(_:)))
+            let target = DisplayLinkTarget(view: self)
+            let link = displayLink(target: target, selector: #selector(DisplayLinkTarget<CircularSpectrumIconView>.displayLinkDidFire(_:)))
+            // 频谱动画 60fps 足够；不设上限时 ProMotion 屏会跑 120fps，功耗翻倍。
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
             link.add(to: .main, forMode: .common)
             link.isPaused = false
             displayLinkTarget = target
@@ -443,24 +414,10 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
     }
 
     @MainActor
-    private final class TitleTickerDisplayLinkTarget: NSObject {
-        weak var view: TitleTickerTextView?
-
-        init(view: TitleTickerTextView) {
-            self.view = view
-        }
-
-        @objc func displayLinkDidFire(_ link: CADisplayLink) {
-            view?.displayLinkDidFire(link)
-        }
-    }
-
-    @MainActor
-    private final class TitleTickerTextView: NSView {
+    private final class TitleTickerTextView: NSView, DisplayLinkResponding {
         var stringValue: String = "" {
             didSet {
                 guard oldValue != stringValue else { return }
-                textVersion &+= 1
                 attributedCache = nil
                 measuredTextSize = .zero
                 measuredTypographicBounds = .zero
@@ -503,12 +460,11 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         }
 
         private var activeDisplayLink: CADisplayLink?
-        private var displayLinkTarget: TitleTickerDisplayLinkTarget?
+        private var displayLinkTarget: DisplayLinkTarget<TitleTickerTextView>?
         private var attributedCache: NSAttributedString?
         private var measuredTextSize: NSSize = .zero
         private var measuredTypographicBounds: NSRect = .zero
         private var cycleStartedAt: CFTimeInterval = CACurrentMediaTime()
-        private var textVersion = 0
 
         override var isOpaque: Bool { false }
 
@@ -642,7 +598,9 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         }
 
         private func updateAnimationState() {
-            guard window != nil else {
+            // 隐藏（orderOut）后 window 仍非 nil：必须以可见性判定，
+            // 否则标题滚动 display link 在窗口隐藏后持续 60fps 空转。
+            guard window?.isVisible == true else {
                 stopDisplayDriver()
                 return
             }
@@ -657,8 +615,9 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
 
         private func startDisplayDriverIfNeeded() {
             guard activeDisplayLink == nil else { return }
-            let target = TitleTickerDisplayLinkTarget(view: self)
-            let link = displayLink(target: target, selector: #selector(TitleTickerDisplayLinkTarget.displayLinkDidFire(_:)))
+            let target = DisplayLinkTarget(view: self)
+            let link = displayLink(target: target, selector: #selector(DisplayLinkTarget<TitleTickerTextView>.displayLinkDidFire(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
             link.add(to: .main, forMode: .common)
             link.isPaused = false
             displayLinkTarget = target
@@ -671,8 +630,21 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             displayLinkTarget = nil
         }
 
-        fileprivate func displayLinkDidFire(_ link: CADisplayLink) {
+        func displayLinkDidFire(_ link: CADisplayLink) {
+            // 自愈：窗口不可见时主动停驱动，防止 orderOut 后 link 残留空转。
+            guard window?.isVisible == true else {
+                stopDisplayDriver()
+                return
+            }
             needsDisplay = true
+        }
+
+        /// 供宿主窗口上屏后补调：首次 show 时文本先于 orderFront 赋值，
+        /// didSet 里的 updateAnimationState 会因窗口尚不可见而拒绝启动滚动，
+        /// 需要在 orderFront 之后重估一次（与 LineView 靠轮询自愈不同，本视图
+        /// 只在文本/字体/尺寸变化时重估，错过即静置到下一次文本变化）。
+        func refreshAnimationState() {
+            updateAnimationState()
         }
 
         private func protectedTextRect() -> NSRect {
@@ -683,42 +655,8 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         private func applyEdgeFade(in context: CGContext) {
             let fade = min(max(0, fadeEdgeWidth), bounds.width / 3)
             guard fade > 1 else { return }
-
-            let colorSpace = CGColorSpaceCreateDeviceRGB()
-            guard
-                let leftGradient = CGGradient(
-                    colorsSpace: colorSpace,
-                    colors: [
-                        NSColor.black.withAlphaComponent(0.82).cgColor,
-                        NSColor.black.withAlphaComponent(0.0).cgColor
-                    ] as CFArray,
-                    locations: [0, 1]
-                ),
-                let rightGradient = CGGradient(
-                    colorsSpace: colorSpace,
-                    colors: [
-                        NSColor.black.withAlphaComponent(0.0).cgColor,
-                        NSColor.black.withAlphaComponent(0.82).cgColor
-                    ] as CFArray,
-                    locations: [0, 1]
-                )
-            else { return }
-
-            context.saveGState()
-            context.setBlendMode(.destinationOut)
-            context.drawLinearGradient(
-                leftGradient,
-                start: CGPoint(x: bounds.minX, y: bounds.midY),
-                end: CGPoint(x: bounds.minX + fade, y: bounds.midY),
-                options: []
-            )
-            context.drawLinearGradient(
-                rightGradient,
-                start: CGPoint(x: bounds.maxX - fade, y: bounds.midY),
-                end: CGPoint(x: bounds.maxX, y: bounds.midY),
-                options: []
-            )
-            context.restoreGState()
+            guard let gradients = EdgeFadeRenderer.makeGradients(peakAlpha: 0.82) else { return }
+            EdgeFadeRenderer.apply(in: context, bounds: bounds, fade: fade, gradients: gradients)
         }
     }
 
@@ -900,7 +838,12 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         }
 
         let cleanSongTitle = songTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let titleText = cleanSongTitle?.isEmpty == false ? (cleanSongTitle ?? "") : "音乐歌词"
+        let titleText: String
+        if let cleanSongTitle, !cleanSongTitle.isEmpty {
+            titleText = cleanSongTitle
+        } else {
+            titleText = "音乐歌词"
+        }
         let cleanTranslation = translation?.trimmingCharacters(in: .whitespacesAndNewlines)
         let visibleTranslation = showsTranslation && cleanTranslation?.isEmpty == false ? cleanTranslation : nil
         let lyricText = compactLyric(primary: cleanPrimary, translation: visibleTranslation)
@@ -926,9 +869,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             lyricLabel.stringValue = lyricText
             currentLyricText = lyricText
         }
-        if isSpectrumEnabled, didTextChange || didLineChange {
-            spectrumView.pulse(strength: didLineChange ? 0.68 : 0.44)
-        }
         currentLineIdentity = lineStartTime
         lyricLabel.syncLineTiming(
             identity: lineStartTime,
@@ -953,6 +893,9 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             layoutLabels(size: displaySize)
             orderFrontRegardless()
             animatePresentationIn(to: targetFrame, targetSize: displaySize)
+            // 首次上屏：标题文本是在 orderFront 之前赋值的，其 didSet 的可见性
+            // 判定当时为 false，滚动驱动没启动；上屏后必须补估一次。
+            titleLabel.refreshAnimationState()
         } else {
             let frameChanged = !NSEqualRects(frame, targetFrame)
             if frameChanged {
@@ -984,9 +927,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         spectrumView.isActive = false
         audioSpectrumMonitor.stop()
 
-        let currentSize = frame.size.width > 20 && frame.size.height > 8 ? frame.size : baseSize
-        let collapsedSize = presentationCollapsedSize(for: currentSize)
-        animatePresentationOut(to: continentFrame(size: collapsedSize), duration: 0.105) { [weak self] in
+        animatePresentationOut(duration: 0.105) { [weak self] in
             self?.orderOut(nil)
         }
     }
@@ -1162,13 +1103,14 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         hoverHiddenRestoreFrame = frame
         startHoverRestoreTimer()
 
-        let collapsedSize = presentationCollapsedSize(for: frame.size)
-        animatePresentationOut(to: continentFrame(size: collapsedSize), duration: 0.105)
+        animatePresentationOut(duration: 0.105)
     }
 
     private func startHoverRestoreTimer() {
         hoverRestoreTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.035, repeats: true) { [weak self] _ in
+        // 悬停隐藏期持续轮询鼠标位置（窗口 ignoresMouseEvents 收不到事件）。
+        // 0.1s 足够灵敏（恢复无感），0.035s 纯属空转唤醒。
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.checkMouseHoverRestore()
             }
@@ -1622,7 +1564,6 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         CATransaction.commit()
     }
 
-
     private func animatePresentationIn(to targetFrame: NSRect, targetSize: NSSize, duration: TimeInterval = 0.30) {
         let wasVisuallyHidden = alphaValue < 0.05 || !isVisible
         setFrame(targetFrame, display: true)
@@ -1681,7 +1622,8 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         }
     }
 
-    private func animatePresentationOut(to targetFrame: NSRect, duration: TimeInterval, completion: (@Sendable @MainActor () -> Void)? = nil) {
+    /// targetFrame 形参已移除：退场动画从不改写窗口 frame，实际由调用方决定（见下方注释）。
+    private func animatePresentationOut(duration: TimeInterval, completion: (@Sendable @MainActor () -> Void)? = nil) {
         let currentSize = frame.size.width > 20 && frame.size.height > 8 ? frame.size : baseSize
         guard let layer = preparePresentationLayer() else {
             completion?()
@@ -1703,7 +1645,7 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
         )
 
         hasShadow = false
-        alphaValue = max(alphaValue, 1)
+        alphaValue = 1
         animatePresentationLayer(
             layer: layer,
             from: fromState,
@@ -1718,87 +1660,18 @@ final class DynamicIslandLyricsWindow: FloatingOverlayPanel {
             self.setPresentationLayer(scaleX: 1.0, scaleY: 1.0, opacity: 1.0)
             // Keep the real window frame unchanged during the hide animation.  The caller decides
             // whether to order the panel out or restore it after mouse hover.
-            _ = targetFrame
             completion?()
         }
     }
 
-
 }
 @MainActor
-private final class MenuBarLyricsTickerDisplayLinkTarget: NSObject {
-    weak var view: MenuBarLyricsTickerView?
-
-    init(view: MenuBarLyricsTickerView) {
-        self.view = view
-    }
-
-    @objc func displayLinkDidFire(_ link: CADisplayLink) {
-        view?.displayLinkDidFire(link)
-    }
-}
-
-@MainActor
-private final class MenuBarLyricsTickerView: NSView {
-    private struct LineTiming {
-        var identity: TimeInterval?
-        var duration: CFTimeInterval?
-        var previousDuration: CFTimeInterval?
-        var nextDuration: CFTimeInterval?
-        var elapsedAtSync: CFTimeInterval
-        var syncedAt: CFTimeInterval
-        /// Visual timeline speed. Normally 1.0; after pause/resume it is nudged slightly
-        /// above/below 1.0 so the menu bar text catches up without a visible position jump.
-        var rate: CFTimeInterval
-
-        func elapsed(at now: CFTimeInterval, isPaused: Bool) -> CFTimeInterval {
-            let raw = isPaused ? elapsedAtSync : elapsedAtSync + (now - syncedAt) * rate
-            guard let duration else { return max(0, raw) }
-            return min(max(0, raw), duration)
-        }
-    }
-
-    private struct ScrollPlanSignature: Equatable {
-        var textVersion: Int
-        var widthBucket: Int
-        var textWidthBucket: Int
-        var fontBucket: Int
-        var durationBucket: Int
-        var wordTimingBucket: Int
-    }
-
-    private struct WordScrollAnchor {
-        var time: CFTimeInterval
-        var offset: CGFloat
-    }
-
-    private struct TimedScrollPlan {
-        var signature: ScrollPlanSignature
-        var travelDuration: CFTimeInterval
-        var targetOffset: CGFloat
-        var rampFraction: CFTimeInterval
-        var wordAnchors: [WordScrollAnchor]
-    }
-
-    private struct UntimedState {
-        enum Phase {
-            case headHold
-            case moving
-            case tailHold
-            case resetFade
-        }
-
-        var phase: Phase = .headHold
-        var phaseStartedAt: CFTimeInterval = CACurrentMediaTime()
-        var resetSwapped = false
-        var offset: CGFloat = 0
-        var alpha: CGFloat = 1
-    }
+private final class MenuBarLyricsTickerView: NSView, DisplayLinkResponding {
+    /// 滚动时序与采样引擎（单实现，与桌面歌词行视图共用；行为基准为灵动大陆调优版本）。
+    private let engine = LyricsScrollEngine()
 
     private struct Metrics {
         static let horizontalInset: CGFloat = 7
-        static let wrapGap: CGFloat = 36
-        static let fallbackSpeed: CGFloat = 46
     }
 
     var font: NSFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium) {
@@ -1818,8 +1691,8 @@ private final class MenuBarLyricsTickerView: NSView {
     var alignment: NSTextAlignment = .center {
         didSet {
             guard oldValue != alignment else { return }
-            attributedText = nil
-            invalidateScrollPlan()
+            engine.alignment = alignment
+            engine.invalidateScrollPlan()
             needsDisplay = true
         }
     }
@@ -1828,26 +1701,9 @@ private final class MenuBarLyricsTickerView: NSView {
     private var attributedText: NSAttributedString?
     private var measuredTextRect: NSRect = .zero
     private var measuredSize: NSSize = .zero
-    private var textVersion = 0
-    private var lineTiming = LineTiming(
-        identity: nil,
-        duration: nil,
-        previousDuration: nil,
-        nextDuration: nil,
-        elapsedAtSync: 0,
-        syncedAt: CACurrentMediaTime(),
-        rate: 1.0
-    )
-    private var timingIsFresh = false
-    private var timingIsPaused = false
-    private var cachedPlan: TimedScrollPlan?
-    private var timedOffsetMemory: (identity: TimeInterval?, maxOffset: CGFloat, offset: CGFloat, timestamp: CFTimeInterval)?
-    private var wordTimings: [DesktopLyricWordTiming] = []
     private var displayTimestamp: CFTimeInterval = CACurrentMediaTime()
-    private var untimedState = UntimedState()
-    private var untimedPausedAt: CFTimeInterval?
     private var activeDisplayLink: CADisplayLink?
-    private var displayLinkTarget: MenuBarLyricsTickerDisplayLinkTarget?
+    private var displayLinkTarget: DisplayLinkTarget<MenuBarLyricsTickerView>?
 
     override var isOpaque: Bool { false }
 
@@ -1866,6 +1722,22 @@ private final class MenuBarLyricsTickerView: NSView {
         canDrawConcurrently = false
         layer?.masksToBounds = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
+
+        // 显式同步引擎字号：engine 默认 28，而本视图实际字号 12——若只依赖
+        // font.didSet，ensureTickerView 赋同款字体时 guard 跳过，engine.fontPointSize
+        // 永远停在 28，repeatGapWidth/minimumVisualStep 等按 28 计算导致间距偏大。
+        resetTextCaches()
+
+        engine.onRequestRedraw = { [weak self] in self?.needsDisplay = true }
+        engine.measureInlineWidth = { [weak self] text in
+            guard let self else { return 0 }
+            return self.measuredInlineWidth(text)
+        }
+        engine.currentMaxOffset = { [weak self] in
+            guard let self, !self.stringValue.isEmpty else { return 0 }
+            let textSize = self.measuredSizeForCurrentText()
+            return max(0, textSize.width - self.protectedTextRect().width)
+        }
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
@@ -1896,7 +1768,7 @@ private final class MenuBarLyricsTickerView: NSView {
         let oldSize = frame.size
         super.setFrameSize(newSize)
         if abs(oldSize.width - newSize.width) > 0.5 || abs(oldSize.height - newSize.height) > 0.5 {
-            invalidateScrollPlan()
+            engine.invalidateScrollPlan()
             updateAnimationState()
             needsDisplay = true
         }
@@ -1916,10 +1788,15 @@ private final class MenuBarLyricsTickerView: NSView {
         let oldText = stringValue
         if oldText != trimmed {
             stringValue = trimmed
-            resetTextCaches()
-            resetLineState(keepsTiming: false)
+            engine.text = trimmed
+            engine.invalidateTextCaches()
+            engine.resetLineState(keepsTiming: false)
+            // 视图级富文本/尺寸缓存必须一并失效，否则 draw() 永远命中旧句缓存。
+            attributedText = nil
+            measuredTextRect = .zero
+            measuredSize = .zero
         }
-        syncLineTiming(
+        engine.syncLineTiming(
             identity: lineStartTime,
             duration: lineDuration,
             elapsed: lineElapsed,
@@ -1934,13 +1811,11 @@ private final class MenuBarLyricsTickerView: NSView {
 
     func clear() {
         stringValue = ""
+        engine.text = ""
+        engine.clearAll()
         attributedText = nil
         measuredTextRect = .zero
         measuredSize = .zero
-        cachedPlan = nil
-        wordTimings = []
-        timingIsFresh = false
-        timingIsPaused = false
         stopDisplayDriver()
         needsDisplay = true
     }
@@ -1953,7 +1828,7 @@ private final class MenuBarLyricsTickerView: NSView {
         let textSize = measuredSizeForCurrentText()
         let maxOffset = max(0, textSize.width - textRect.width)
         let shouldScroll = maxOffset > 8
-        let sample = renderSample(maxOffset: maxOffset, shouldScroll: shouldScroll)
+        let sample = engine.renderSample(maxOffset: maxOffset, shouldScroll: shouldScroll, viewportWidth: textRect.width, now: renderTimestamp())
         let x = drawingOriginX(textWidth: textSize.width, shouldScroll: shouldScroll, offset: sample.offset, textRect: textRect)
         let y = verticallyCenteredTextY()
         NSGraphicsContext.saveGraphicsState()
@@ -1961,303 +1836,13 @@ private final class MenuBarLyricsTickerView: NSView {
         if sample.alpha < 0.999 {
             NSGraphicsContext.current?.cgContext.setAlpha(sample.alpha)
         }
-        attributed.draw(at: NSPoint(x: x, y: y))
+        // 与桌面歌词一致的多份 repeat marquee：长行按引擎计划重复绘制。
+        let copies = max(1, sample.repeatCount)
+        let stride = sample.repeatStride > 1 ? sample.repeatStride : 0
+        for index in 0..<copies {
+            attributed.draw(at: NSPoint(x: x + CGFloat(index) * stride, y: y))
+        }
         NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private func syncLineTiming(
-        identity: TimeInterval?,
-        duration: TimeInterval?,
-        elapsed: TimeInterval,
-        previousDuration: TimeInterval?,
-        nextDuration: TimeInterval?,
-        wordTimings: [DesktopLyricWordTiming] = [],
-        isPlaying: Bool = true
-    ) {
-        let now = CACurrentMediaTime()
-        let normalizedIdentity = normalizedIdentity(identity)
-        let normalizedDuration = normalizedDuration(duration)
-        let normalizedPrevious = normalizedNeighborDuration(previousDuration)
-        let normalizedNext = normalizedNeighborDuration(nextDuration)
-        let normalizedWords = normalizedWordTimings(wordTimings, duration: normalizedDuration)
-        if normalizedWords != self.wordTimings {
-            self.wordTimings = normalizedWords
-            timedOffsetMemory = nil
-            invalidateScrollPlan()
-        }
-        let normalizedElapsed = normalizedDuration.map { min(max(0, elapsed), $0) } ?? max(0, elapsed)
-        let shouldFreezeTiming = !isPlaying
-        let visualElapsedBeforeUpdate = lineTiming.elapsed(at: now, isPaused: timingIsPaused)
-
-        let identityChanged = didLineIdentityChange(from: lineTiming.identity, to: normalizedIdentity)
-        if identityChanged {
-            resetLineState(keepsTiming: true)
-            lineTiming.identity = normalizedIdentity
-            lineTiming.duration = normalizedDuration
-            lineTiming.previousDuration = normalizedPrevious
-            lineTiming.nextDuration = normalizedNext
-            lineTiming.elapsedAtSync = normalizedElapsed
-            lineTiming.syncedAt = now
-            lineTiming.rate = 1.0
-            timingIsFresh = normalizedDuration != nil
-            timingIsPaused = shouldFreezeTiming
-            invalidateScrollPlan()
-            return
-        }
-
-        let oldDuration = lineTiming.duration
-        let oldPrevious = lineTiming.previousDuration
-        let oldNext = lineTiming.nextDuration
-        let wasPaused = timingIsPaused
-        lineTiming.identity = normalizedIdentity
-        lineTiming.duration = normalizedDuration
-        lineTiming.previousDuration = normalizedPrevious
-        lineTiming.nextDuration = normalizedNext
-        timingIsFresh = normalizedDuration != nil
-        timingIsPaused = shouldFreezeTiming
-
-        if shouldFreezeTiming {
-            // Pause must freeze the exact visual frame. Do not rebase to MediaRemote's elapsed
-            // time, because that value can be one polling tick ahead/behind the text currently on
-            // screen and causes the visible jump/"twitch".
-            if !wasPaused {
-                if oldDuration == nil || !timingIsFresh {
-                    freezeUntimedMotion(at: now)
-                    untimedPausedAt = now
-                }
-                lineTiming.elapsedAtSync = normalizedDuration.map { min(max(0, visualElapsedBeforeUpdate), $0) } ?? max(0, visualElapsedBeforeUpdate)
-                lineTiming.syncedAt = now
-                lineTiming.rate = 1.0
-            }
-        } else if wasPaused {
-            if let pausedAt = untimedPausedAt {
-                untimedState.phaseStartedAt += now - pausedAt
-                untimedPausedAt = nil
-            }
-            // Resume from the frozen visual timeline, then gently drift toward the real playback
-            // clock by changing speed a little. This keeps the scroll continuous instead of
-            // jumping to the system-reported position on the first playing tick.
-            let frozenElapsed = normalizedDuration.map { min(max(0, visualElapsedBeforeUpdate), $0) } ?? max(0, visualElapsedBeforeUpdate)
-            lineTiming.elapsedAtSync = frozenElapsed
-            lineTiming.syncedAt = now
-            lineTiming.rate = correctionRate(forDrift: normalizedElapsed - frozenElapsed, duration: normalizedDuration)
-        } else if oldDuration == nil, normalizedDuration != nil {
-            lineTiming.elapsedAtSync = normalizedElapsed
-            lineTiming.syncedAt = now
-            lineTiming.rate = 1.0
-        } else if let duration = normalizedDuration {
-            let predicted = lineTiming.elapsed(at: now, isPaused: timingIsPaused)
-            let drift = normalizedElapsed - predicted
-            if isLikelySeek(drift: drift, predicted: predicted, reported: normalizedElapsed, duration: duration) {
-                lineTiming.elapsedAtSync = normalizedElapsed
-                lineTiming.syncedAt = now
-                lineTiming.rate = 1.0
-                timedOffsetMemory = nil
-                invalidateScrollPlan()
-            } else if abs(drift) < 0.24 {
-                // Ignore ordinary MediaRemote polling jitter. Rebase to the current visual frame and
-                // keep a neutral rate; otherwise tiny elapsed-time corrections show up as slow-motion
-                // word-lyric tremble.
-                lineTiming.elapsedAtSync = predicted
-                lineTiming.syncedAt = now
-                lineTiming.rate = 1.0
-            } else {
-                // Never correct ordinary polling drift by moving the offset immediately. Keep the
-                // current position as the base and use a small speed bias to catch up or slow down.
-                lineTiming.elapsedAtSync = predicted
-                lineTiming.syncedAt = now
-                lineTiming.rate = correctionRate(forDrift: drift, duration: normalizedDuration)
-            }
-        } else {
-            lineTiming.elapsedAtSync = normalizedElapsed
-            lineTiming.syncedAt = now
-            lineTiming.rate = 1.0
-        }
-
-        if durationChanged(oldDuration, normalizedDuration)
-            || neighborDurationChanged(oldPrevious, normalizedPrevious)
-            || neighborDurationChanged(oldNext, normalizedNext) {
-            invalidateScrollPlan()
-        }
-    }
-
-    private func renderSample(maxOffset: CGFloat, shouldScroll: Bool) -> (offset: CGFloat, alpha: CGFloat) {
-        guard shouldScroll else { return (0, 1) }
-        let now = renderTimestamp()
-        if let duration = lineTiming.duration, timingIsFresh {
-            let plan = scrollPlan(duration: duration, maxOffset: maxOffset)
-            return (timedOffset(at: now, plan: plan), 1)
-        }
-        if timingIsPaused {
-            return (untimedState.offset, untimedState.alpha)
-        }
-        return untimedSample(at: now, maxOffset: maxOffset)
-    }
-
-    private func freezeUntimedMotion(at timestamp: CFTimeInterval) {
-        guard !stringValue.isEmpty, bounds.width > 2, bounds.height > 2 else { return }
-        let textRect = protectedTextRect()
-        let textSize = measuredSizeForCurrentText()
-        let maxOffset = max(0, textSize.width - textRect.width)
-        guard maxOffset > 8 else { return }
-        _ = untimedSample(at: timestamp, maxOffset: maxOffset)
-    }
-
-    private func scrollPlan(duration: CFTimeInterval, maxOffset: CGFloat) -> TimedScrollPlan {
-        let signature = currentSignature(duration: duration, maxOffset: maxOffset)
-        if let cachedPlan, cachedPlan.signature == signature {
-            return cachedPlan
-        }
-
-        let visibleWidth = max(1, protectedTextRect().width)
-        let textWidth = visibleWidth + maxOffset
-        // `duration` is already normalized to [0.14, 42.0] by syncLineTiming; no extra clamp.
-        let rampFraction = formulaRampFraction(
-            lineDuration: duration,
-            viewportWidth: visibleWidth,
-            textWidth: textWidth,
-            maxOffset: maxOffset
-        )
-        let wordAnchors = wordScrollAnchors(duration: duration, viewportWidth: visibleWidth, maxOffset: maxOffset)
-
-        let plan = TimedScrollPlan(
-            signature: signature,
-            travelDuration: duration,
-            targetOffset: maxOffset,
-            rampFraction: rampFraction,
-            wordAnchors: wordAnchors
-        )
-        cachedPlan = plan
-        return plan
-    }
-
-    private func timedOffset(at timestamp: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
-        let elapsed = lineTiming.elapsed(at: timestamp, isPaused: timingIsPaused)
-        let rawOffset: CGFloat
-        if !plan.wordAnchors.isEmpty {
-            rawOffset = fluidWordTimedOffset(elapsed: elapsed, plan: plan)
-        } else {
-            let progress = clamp(elapsed / max(0.001, plan.travelDuration), 0, 1)
-            let curve = CGFloat(lineTimelineProgress(progress, rampFraction: plan.rampFraction))
-            rawOffset = plan.targetOffset * curve
-        }
-        return continuousTimedOffset(rawOffset, maxOffset: plan.targetOffset, at: timestamp)
-    }
-
-    private func continuousTimedOffset(_ rawOffset: CGFloat, maxOffset: CGFloat, at timestamp: CFTimeInterval) -> CGFloat {
-        let clampedOffset = min(max(0, rawOffset), maxOffset)
-        guard !timingIsPaused else {
-            timedOffsetMemory = (lineTiming.identity, maxOffset, clampedOffset, timestamp)
-            return clampedOffset
-        }
-
-        guard let memory = timedOffsetMemory else {
-            timedOffsetMemory = (lineTiming.identity, maxOffset, clampedOffset, timestamp)
-            return clampedOffset
-        }
-
-        let sameIdentity = !didLineIdentityChange(from: memory.identity, to: lineTiming.identity)
-        let sameDistance = abs(memory.maxOffset - maxOffset) <= 2.0
-        let deltaTime = timestamp - memory.timestamp
-        guard sameIdentity, sameDistance, deltaTime >= 0, deltaTime <= 0.24 else {
-            timedOffsetMemory = (lineTiming.identity, maxOffset, clampedOffset, timestamp)
-            return clampedOffset
-        }
-
-        // Keep the ticker monotonic, but avoid snapping tiny word-timed deltas. Those snaps are
-        // visible in slow lines as a subtle stop-start cadence.
-        let monotonicTarget = max(memory.offset, clampedOffset)
-        let hasWordTiming = !wordTimings.isEmpty
-        let smoothingTime = hasWordTiming ? 0.038 : 0.026
-        let factor = 1 - exp(-clamp(deltaTime, 0.001, 0.050) / smoothingTime)
-        var stabilized = memory.offset + (monotonicTarget - memory.offset) * CGFloat(factor)
-        if hasWordTiming {
-            if maxOffset - monotonicTarget < 0.24 {
-                stabilized = monotonicTarget
-            }
-        } else {
-            let snapDistance: CGFloat = 0.12
-            if monotonicTarget - stabilized < snapDistance {
-                stabilized = monotonicTarget
-            }
-        }
-        timedOffsetMemory = (lineTiming.identity, maxOffset, stabilized, timestamp)
-        return stabilized
-    }
-
-    private func untimedSample(at timestamp: CFTimeInterval, maxOffset: CGFloat) -> (offset: CGFloat, alpha: CGFloat) {
-        let elapsed = timestamp - untimedState.phaseStartedAt
-        let travelDuration = max(1.25, CFTimeInterval(maxOffset / max(18, Metrics.fallbackSpeed)))
-
-        switch untimedState.phase {
-        case .headHold:
-            untimedState.offset = 0
-            untimedState.alpha = 1
-            if elapsed >= 0.75 {
-                untimedState.phase = .moving
-                untimedState.phaseStartedAt = timestamp
-            }
-        case .moving:
-            let progress = clamp(elapsed / travelDuration, 0, 1)
-            // rampFraction 取 formulaRampFraction 输出上限 0.155，与桌面歌词的
-            // untimed 路径一致（0.20 会命中 lineTimelineProgress 内部 clamp 上限）。
-            untimedState.offset = maxOffset * CGFloat(lineTimelineProgress(progress, rampFraction: 0.155))
-            untimedState.alpha = 1
-            if progress >= 1 {
-                untimedState.offset = maxOffset
-                untimedState.phase = .tailHold
-                untimedState.phaseStartedAt = timestamp
-            }
-        case .tailHold:
-            untimedState.offset = maxOffset
-            untimedState.alpha = 1
-            if elapsed >= 0.80 {
-                untimedState.phase = .resetFade
-                untimedState.phaseStartedAt = timestamp
-                untimedState.resetSwapped = false
-            }
-        case .resetFade:
-            let progress = clamp(elapsed / 0.24, 0, 1)
-            if progress >= 0.50, !untimedState.resetSwapped {
-                untimedState.offset = 0
-                untimedState.resetSwapped = true
-            }
-            if progress < 0.50 {
-                untimedState.alpha = CGFloat(1 - easeOutCubic(progress * 2))
-            } else {
-                untimedState.alpha = CGFloat(easeOutCubic((progress - 0.5) * 2))
-            }
-            if progress >= 1 {
-                untimedState.offset = 0
-                untimedState.alpha = 1
-                untimedState.phase = .headHold
-                untimedState.phaseStartedAt = timestamp
-                untimedState.resetSwapped = false
-            }
-        }
-        return (untimedState.offset, untimedState.alpha)
-    }
-
-
-    private func correctionRate(forDrift drift: CFTimeInterval, duration: CFTimeInterval?) -> CFTimeInterval {
-        let lineDuration = duration ?? 3.0
-        let recoveryWindow = clamp(lineDuration * 0.42, 0.85, 2.80)
-        let maxSlowdown = lineDuration < 1.45 ? 0.16 : 0.115
-        let maxSpeedup = lineDuration < 1.45 ? 0.24 : 0.165
-        let requestedBias = drift / max(0.20, recoveryWindow)
-        return 1.0 + clamp(requestedBias, -maxSlowdown, maxSpeedup)
-    }
-
-    private func isLikelySeek(
-        drift: CFTimeInterval,
-        predicted: CFTimeInterval,
-        reported: CFTimeInterval,
-        duration: CFTimeInterval
-    ) -> Bool {
-        let backwardTolerance = duration < 1.55 ? 0.18 : 0.30
-        if reported + backwardTolerance < predicted { return true }
-        let seekThreshold = max(1.85, min(5.0, duration * 0.62))
-        return abs(drift) > seekThreshold
     }
 
     private func updateLayerScale() {
@@ -2265,11 +1850,13 @@ private final class MenuBarLyricsTickerView: NSView {
     }
 
     private func updateAnimationState() {
-        guard window != nil else {
+        // 与桌面歌词行视图一致：以可见性判定（orderOut 后 window 仍非 nil），
+        // 防止 display link 在不可见窗口上持续空转。
+        guard window?.isVisible == true else {
             stopDisplayDriver()
             return
         }
-        if !timingIsPaused, !stringValue.isEmpty, bounds.width > 2, measuredSizeForCurrentText().width > protectedTextRect().width + 8 {
+        if !engine.timingIsPaused, !stringValue.isEmpty, bounds.width > 2, measuredSizeForCurrentText().width > protectedTextRect().width + 8 {
             startDisplayDriver()
         } else {
             stopDisplayDriver()
@@ -2280,8 +1867,8 @@ private final class MenuBarLyricsTickerView: NSView {
     private func startDisplayDriver() {
         guard activeDisplayLink == nil, window != nil else { return }
         displayTimestamp = CACurrentMediaTime()
-        let target = MenuBarLyricsTickerDisplayLinkTarget(view: self)
-        let link = displayLink(target: target, selector: #selector(MenuBarLyricsTickerDisplayLinkTarget.displayLinkDidFire(_:)))
+        let target = DisplayLinkTarget(view: self)
+        let link = displayLink(target: target, selector: #selector(DisplayLinkTarget<MenuBarLyricsTickerView>.displayLinkDidFire(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
         link.add(to: .main, forMode: .common)
         link.isPaused = false
@@ -2295,7 +1882,7 @@ private final class MenuBarLyricsTickerView: NSView {
         displayLinkTarget = nil
     }
 
-    fileprivate func displayLinkDidFire(_ link: CADisplayLink) {
+    func displayLinkDidFire(_ link: CADisplayLink) {
         // Use the actual display-link timestamp rather than the predicted target timestamp; the
         // predicted value can jitter slightly under variable refresh pacing and makes slow lyric
         // motion look uneven.
@@ -2364,183 +1951,16 @@ private final class MenuBarLyricsTickerView: NSView {
     }
 
     private func resetTextCaches() {
-        textVersion &+= 1
+        engine.fontPointSize = font.pointSize
+        engine.invalidateTextCaches()
         attributedText = nil
         measuredTextRect = .zero
         measuredSize = .zero
-        invalidateScrollPlan()
-    }
-
-    private func resetLineState(keepsTiming: Bool) {
-        untimedState = UntimedState(phase: .headHold, phaseStartedAt: CACurrentMediaTime(), resetSwapped: false, offset: 0, alpha: 1)
-        cachedPlan = nil
-        timedOffsetMemory = nil
-        if !keepsTiming {
-            wordTimings = []
-            lineTiming = LineTiming(identity: nil, duration: nil, previousDuration: nil, nextDuration: nil, elapsedAtSync: 0, syncedAt: CACurrentMediaTime(), rate: 1.0)
-            timingIsFresh = false
-            timingIsPaused = false
-            untimedPausedAt = nil
-        }
-        needsDisplay = true
-    }
-
-    private func invalidateScrollPlan() {
-        cachedPlan = nil
-        needsDisplay = true
-    }
-
-    private func currentSignature(duration: CFTimeInterval, maxOffset: CGFloat) -> ScrollPlanSignature {
-        ScrollPlanSignature(
-            textVersion: textVersion,
-            widthBucket: Int((protectedTextRect().width / 2).rounded()),
-            textWidthBucket: Int((maxOffset / 2).rounded()),
-            fontBucket: Int((font.pointSize * 10).rounded()),
-            durationBucket: bucket(lineTiming.duration ?? duration),
-            wordTimingBucket: wordTimingBucket()
-        )
-    }
-
-    private func bucket(_ value: CFTimeInterval) -> Int {
-        Int((value * 5).rounded())
-    }
-
-    private func normalizedIdentity(_ value: TimeInterval?) -> TimeInterval? {
-        guard let value, value.isFinite else { return nil }
-        return (value * 1000).rounded() / 1000
-    }
-
-    private func normalizedDuration(_ value: TimeInterval?) -> CFTimeInterval? {
-        guard let value, value.isFinite, value > 0.12 else { return nil }
-        return min(42.0, max(0.14, value))
-    }
-
-    private func normalizedNeighborDuration(_ value: TimeInterval?) -> CFTimeInterval? {
-        guard let value, value.isFinite, value > 0.12 else { return nil }
-        return min(42.0, max(0.14, value))
-    }
-
-    private func didLineIdentityChange(from old: TimeInterval?, to new: TimeInterval?) -> Bool {
-        switch (old, new) {
-        case (.none, .none):
-            return false
-        case let (.some(lhs), .some(rhs)):
-            return abs(lhs - rhs) > 0.012
-        default:
-            return true
-        }
-    }
-
-    private func durationChanged(_ lhs: CFTimeInterval?, _ rhs: CFTimeInterval?) -> Bool {
-        switch (lhs, rhs) {
-        case (.none, .none):
-            return false
-        case let (.some(a), .some(b)):
-            return abs(a - b) > 0.16
-        default:
-            return true
-        }
-    }
-
-    private func neighborDurationChanged(_ lhs: CFTimeInterval?, _ rhs: CFTimeInterval?) -> Bool {
-        switch (lhs, rhs) {
-        case (.none, .none):
-            return false
-        case let (.some(a), .some(b)):
-            return abs(a - b) > 0.28
-        default:
-            return false
-        }
-    }
-
-    private func normalizedWordTimings(_ timings: [DesktopLyricWordTiming], duration: CFTimeInterval?) -> [DesktopLyricWordTiming] {
-        let textLength = stringValue.utf16.count
-        guard textLength > 0, !timings.isEmpty else { return [] }
-        let maxEnd = duration ?? timings.map(\.end).max() ?? 0
-        return timings.filter { timing in
-            timing.start.isFinite
-                && timing.end.isFinite
-                && timing.end > timing.start + 0.015
-                && timing.start >= -0.020
-                && timing.end <= maxEnd + 0.75
-                && timing.utf16Location >= 0
-                && timing.utf16Length > 0
-                && timing.utf16End <= textLength
-        }
-        .map { timing in
-            DesktopLyricWordTiming(
-                start: max(0, timing.start),
-                end: min(maxEnd, timing.end),
-                utf16Location: timing.utf16Location,
-                utf16Length: timing.utf16Length
-            )
-        }
-        .sorted { lhs, rhs in
-            if abs(lhs.start - rhs.start) > 0.0005 { return lhs.start < rhs.start }
-            return lhs.utf16Location < rhs.utf16Location
-        }
-    }
-
-    private func wordTimingBucket() -> Int {
-        guard !wordTimings.isEmpty else { return 0 }
-        var hash = wordTimings.count &* 31
-        for timing in wordTimings.prefix(8) {
-            hash = hash &* 31 &+ Int((timing.start * 20).rounded())
-            hash = hash &* 31 &+ Int((timing.end * 20).rounded())
-            hash = hash &* 31 &+ timing.utf16Location
-            hash = hash &* 31 &+ timing.utf16Length
-        }
-        if let last = wordTimings.last {
-            hash = hash &* 31 &+ Int((last.end * 20).rounded())
-            hash = hash &* 31 &+ last.utf16End
-        }
-        return hash
     }
 
     /// Where in the visible viewport the currently sung word should rest while it scrolls.
     /// Follows the lyric alignment: left-aligned text parks the active word on the left edge,
     /// right-aligned parks it on the right edge, centered keeps it at the visual center.
-    private func preferredAnchorCenter(viewportWidth: CGFloat) -> CGFloat {
-        switch alignment {
-        case .left, .natural, .justified:
-            return viewportWidth * 0.12
-        case .right:
-            return viewportWidth * 0.88
-        default:
-            return viewportWidth * 0.47
-        }
-    }
-
-    private func wordScrollAnchors(duration: CFTimeInterval, viewportWidth: CGFloat, maxOffset: CGFloat) -> [WordScrollAnchor] {
-        guard !wordTimings.isEmpty, maxOffset > 8, viewportWidth > 8 else { return [] }
-        let nsText = stringValue as NSString
-        let preferredCenter = preferredAnchorCenter(viewportWidth: viewportWidth)
-        var anchors: [WordScrollAnchor] = [WordScrollAnchor(time: 0, offset: 0)]
-        var lastOffset: CGFloat = 0
-
-        for timing in wordTimings {
-            guard timing.utf16End <= nsText.length else { continue }
-            let prefix = nsText.substring(with: NSRange(location: 0, length: timing.utf16Location))
-            let segment = nsText.substring(with: NSRange(location: timing.utf16Location, length: timing.utf16Length))
-            let segmentCenter = measuredInlineWidth(prefix) + measuredInlineWidth(segment) / 2
-            let rawTarget = min(maxOffset, max(lastOffset, segmentCenter - preferredCenter))
-            let target = max(lastOffset, rawTarget)
-            let anchorTime = clamp(mix(timing.start, timing.end, 0.36), 0, duration)
-            let minimumVisualStep = max(3.0, min(6.0, font.pointSize * 0.18))
-
-            if let previous = anchors.last, anchorTime - previous.time < 0.018 {
-                anchors[anchors.count - 1] = WordScrollAnchor(time: previous.time, offset: max(previous.offset, target))
-            } else if target - (anchors.last?.offset ?? 0) >= minimumVisualStep || target >= maxOffset - 1.0 {
-                anchors.append(WordScrollAnchor(time: anchorTime, offset: target))
-            }
-            lastOffset = max(lastOffset, target)
-        }
-
-        if let last = anchors.last, duration - last.time > 0.050, maxOffset - last.offset > 1.5 {
-            anchors.append(WordScrollAnchor(time: duration, offset: maxOffset))
-        }
-        return anchors.count > 1 ? anchors : []
-    }
 
     private func measuredInlineWidth(_ text: String) -> CGFloat {
         guard !text.isEmpty else { return 0 }
@@ -2559,165 +1979,6 @@ private final class MenuBarLyricsTickerView: NSView {
         return attributed.size().width
     }
 
-    private func fluidWordTimedOffset(elapsed: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
-        let progress = clamp(elapsed / max(0.001, plan.travelDuration), 0, 1)
-        let continuousCurve = lineTimelineProgress(
-            progress,
-            rampFraction: min(plan.rampFraction, 0.050)
-        )
-        let continuousOffset = plan.targetOffset * CGFloat(continuousCurve)
-        let guidedOffset = wordTimedOffset(elapsed: elapsed, plan: plan)
-        let durationPressure = clamp((plan.travelDuration - 2.2) / 7.0, 0, 1)
-        let guideWeight = CGFloat(0.34 - durationPressure * 0.14)
-        let blended = continuousOffset * (1 - guideWeight) + guidedOffset * guideWeight
-        return min(max(0, blended), plan.targetOffset)
-    }
-
-    private func wordTimedOffset(elapsed: CFTimeInterval, plan: TimedScrollPlan) -> CGFloat {
-        let anchors = plan.wordAnchors
-        guard let first = anchors.first else { return 0 }
-        let safeElapsed = clamp(elapsed, 0, plan.travelDuration)
-        if safeElapsed <= first.time { return first.offset }
-
-        for index in 1..<anchors.count {
-            let next = anchors[index]
-            if safeElapsed <= next.time {
-                return monotoneHermiteOffset(at: safeElapsed, anchors: anchors, segmentEndIndex: index)
-            }
-        }
-        return anchors.last?.offset ?? 0
-    }
-
-    private func monotoneHermiteOffset(
-        at time: CFTimeInterval,
-        anchors: [WordScrollAnchor],
-        segmentEndIndex index: Int
-    ) -> CGFloat {
-        let previous = anchors[index - 1]
-        let next = anchors[index]
-        let span = max(0.001, next.time - previous.time)
-        let distance = next.offset - previous.offset
-        guard distance > 0.10 else { return previous.offset }
-
-        let currentSlope = CGFloat(distance) / CGFloat(span)
-        let incomingSlope: CGFloat
-        if index >= 2 {
-            let incoming = anchors[index - 1].offset - anchors[index - 2].offset
-            let incomingTime = max(0.001, anchors[index - 1].time - anchors[index - 2].time)
-            incomingSlope = max(0, CGFloat(incoming) / CGFloat(incomingTime))
-        } else {
-            incomingSlope = currentSlope
-        }
-
-        let outgoingSlope: CGFloat
-        if index + 1 < anchors.count {
-            let outgoing = anchors[index + 1].offset - anchors[index].offset
-            let outgoingTime = max(0.001, anchors[index + 1].time - anchors[index].time)
-            outgoingSlope = max(0, CGFloat(outgoing) / CGFloat(outgoingTime))
-        } else {
-            outgoingSlope = currentSlope
-        }
-
-        let maxSlope = currentSlope * 2.70
-        let slope0 = min(maxSlope, max(0, (incomingSlope + currentSlope) * 0.5))
-        let slope1 = min(maxSlope, max(0, (currentSlope + outgoingSlope) * 0.5))
-        let u = CGFloat(clamp((time - previous.time) / span, 0, 1))
-        let u2 = u * u
-        let u3 = u2 * u
-        let h00 = 2 * u3 - 3 * u2 + 1
-        let h10 = u3 - 2 * u2 + u
-        let h01 = -2 * u3 + 3 * u2
-        let h11 = u3 - u2
-        let value = h00 * previous.offset
-            + h10 * CGFloat(span) * slope0
-            + h01 * next.offset
-            + h11 * CGFloat(span) * slope1
-        return min(max(previous.offset, value), next.offset)
-    }
-
-    private func mix(_ a: CFTimeInterval, _ b: CFTimeInterval, _ amount: CFTimeInterval) -> CFTimeInterval {
-        let t = clamp(amount, 0, 1)
-        return a + (b - a) * t
-    }
-
-    private func weightedRhythm(previous: CFTimeInterval, current: CFTimeInterval, next: CFTimeInterval) -> CFTimeInterval {
-        let clampedPrevious = clamp(previous, 0.70, 8.5)
-        let clampedCurrent = clamp(current, 0.70, 8.5)
-        let clampedNext = clamp(next, 0.70, 8.5)
-        return clampedPrevious * 0.22 + clampedCurrent * 0.56 + clampedNext * 0.22
-    }
-
-    private func formulaRampFraction(
-        lineDuration: CFTimeInterval,
-        viewportWidth: CGFloat,
-        textWidth: CGFloat,
-        maxOffset: CGFloat
-    ) -> CFTimeInterval {
-        let visible = max(1, CFTimeInterval(viewportWidth))
-        let total = max(visible, CFTimeInterval(textWidth))
-        let scrollable = max(0, CFTimeInterval(maxOffset))
-        let overflowRatio = clamp(scrollable / visible, 0, 6.0)
-        let coverageRatio = clamp(scrollable / total, 0, 0.96)
-        let shortLinePressure = clamp((1.25 - lineDuration) / 0.95, 0, 1)
-        let longLineEase = clamp((lineDuration - 4.0) / 8.0, 0, 1)
-        return clamp(
-            0.055
-                + longLineEase * 0.070
-                + coverageRatio * 0.040
-                - overflowRatio * 0.012
-                - shortLinePressure * 0.030,
-            0.018,
-            0.155
-        )
-    }
-
-    /// Maps line progress (0...1) to scroll progress with smooth, asymmetric sine ramps. The
-    /// result starts at 0 and lands exactly on 1 when the line duration elapses.
-    ///
-    /// Invariants: velocity is 0 at both ends and exactly 1/totalArea in the middle span,
-    /// so maxOffset is reached precisely at t = 1. The lower clamps are pure zero-division
-    /// guards — formulaRampFraction already keeps the fraction in [0.018, 0.155].
-    private func lineTimelineProgress(_ value: CFTimeInterval, rampFraction: CFTimeInterval) -> CFTimeInterval {
-        let t = clamp(value, 0, 1)
-        let start = clamp(rampFraction * 1.42 + 0.010, 0.001, 0.190)
-        let end = clamp(rampFraction * 0.92 + 0.006, 0.001, 0.145)
-        let totalArea = max(0.001, 1 - (start + end) / 2)
-        if t < start {
-            let u = t / start
-            let area = start * (u - sin(2 * Double.pi * u) / (2 * Double.pi)) / 2
-            return area / totalArea
-        }
-        if t > 1 - end {
-            let u = (1 - t) / end
-            let tailArea = end * (u - sin(2 * Double.pi * u) / (2 * Double.pi)) / 2
-            return 1 - tailArea / totalArea
-        }
-        return (0.5 * start + (t - start)) / totalArea
-    }
-
-    private func clamp(_ value: CFTimeInterval, _ lower: CFTimeInterval, _ upper: CFTimeInterval) -> CFTimeInterval {
-        min(max(value, lower), upper)
-    }
-
-    private func smoothstepIntegral(_ value: CFTimeInterval) -> CFTimeInterval {
-        let t = clamp(value, 0, 1)
-        let t2 = t * t
-        let t4 = t2 * t2
-        let t5 = t4 * t
-        let t6 = t5 * t
-        return t6 - 3 * t5 + 2.5 * t4
-    }
-
-    private func smootherStep(_ value: CFTimeInterval) -> CFTimeInterval {
-        let t = clamp(value, 0, 1)
-        return t * t * t * (t * (t * 6 - 15) + 10)
-    }
-
-    private func easeOutCubic(_ value: CFTimeInterval) -> CFTimeInterval {
-        let t = clamp(value, 0, 1)
-        let p = 1 - t
-        return 1 - p * p * p
-    }
 }
 
 @MainActor
@@ -2741,16 +2002,6 @@ final class MenuBarLyricsSurface {
         statusItem?.length = configuredWidth
         updateTickerFrame()
     }
-
-    func prepare() {
-        let item = ensureStatusItem()
-        item.isVisible = true
-        item.length = configuredWidth
-        let ticker = ensureTickerView(on: item)
-        ticker.setText("音乐歌词", lineStartTime: nil, lineDuration: nil, lineElapsed: 0)
-        item.button?.toolTip = "播放白名单应用中的音乐时显示歌词"
-    }
-
     func show(
         primary: String,
         translation: String?,

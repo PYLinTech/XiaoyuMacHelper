@@ -21,11 +21,16 @@ final class CameraFrameCapture: NSObject, @unchecked Sendable, AVCaptureVideoDat
     }
 
     private let queue = DispatchQueue(label: "local.xiaoyu-mac-helper.active-vision.camera")
+    /// 帧分析专用队列：Vision 推理（弱光下单次可达上百毫秒）不再占用 session
+    /// 控制队列，stopChecking/startChecking 不会被推理阻塞。
+    private let analysisQueue = DispatchQueue(label: "local.xiaoyu-mac-helper.active-vision.analysis")
     private var session: AVCaptureSession?
     private var callback: FaceAttentionCompletionBox?
     private var lastSampleDate: Date?
-    private var isStarting = false
     private var needsGaze = true
+    /// 是否有帧正在推理（仅 queue 上访问）：弱光下单次推理可达上百毫秒，
+    /// 超过 200ms 节流间隔时丢弃新帧，避免 analysisQueue 单调积压、结果越来越陈旧。
+    private var isAnalyzing = false
 
     func startChecking(needsGaze: Bool, _ completion: @escaping (FaceAttentionResult?) -> Void) {
         let callback = FaceAttentionCompletionBox(completion)
@@ -36,7 +41,8 @@ final class CameraFrameCapture: NSObject, @unchecked Sendable, AVCaptureVideoDat
             self.needsGaze = needsGaze
             self.lastSampleDate = nil
 
-            guard self.session == nil, !self.isStarting else {
+            // startSession 全程同步运行在本串行队列内，session == nil 即可判定未启动。
+            guard self.session == nil else {
                 return
             }
 
@@ -51,8 +57,6 @@ final class CameraFrameCapture: NSObject, @unchecked Sendable, AVCaptureVideoDat
     }
 
     private func startSession() {
-        isStarting = true
-
         guard let device = AVCaptureDevice.default(for: .video) else {
             finishStartupFailure()
             return
@@ -92,8 +96,6 @@ final class CameraFrameCapture: NSObject, @unchecked Sendable, AVCaptureVideoDat
             session.addOutput(output)
 
             self.session = session
-            self.lastSampleDate = nil
-            self.isStarting = false
             session.startRunning()
         } catch {
             finishStartupFailure()
@@ -140,12 +142,25 @@ final class CameraFrameCapture: NSObject, @unchecked Sendable, AVCaptureVideoDat
 
             lastSampleDate = now
 
+            guard !isAnalyzing else { return }
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
                 return
             }
 
-            let result = FaceAttentionAnalyzer.analyze(pixelBuffer: pixelBuffer, needsGaze: needsGaze)
-            callback.call(result)
+            // 帧数据在缓冲区被保留期间不会被管线复用（引用计数保证），异步分析安全。
+            // CVPixelBuffer 本体线程安全（CF 类型），Sendable 标注缺失仅为 API 声明问题。
+            nonisolated(unsafe) let analysisBuffer = pixelBuffer
+            let sampleNeedsGaze = needsGaze
+            let callbackBox = callback
+            isAnalyzing = true
+            analysisQueue.async { [weak self, callbackBox] in
+                let result = FaceAttentionAnalyzer.analyze(pixelBuffer: analysisBuffer, needsGaze: sampleNeedsGaze)
+                callbackBox.call(result)
+                guard let self else { return }
+                self.queue.async {
+                    self.isAnalyzing = false
+                }
+            }
         }
     }
 
@@ -158,7 +173,7 @@ final class CameraFrameCapture: NSObject, @unchecked Sendable, AVCaptureVideoDat
     private func stopSession() {
         callback = nil
         lastSampleDate = nil
-        isStarting = false
+        isAnalyzing = false
         session?.stopRunning()
         session = nil
     }

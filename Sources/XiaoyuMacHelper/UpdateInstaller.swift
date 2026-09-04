@@ -32,14 +32,24 @@ enum UpdateInstaller {
             progress: progress
         )
         let configuration = URLSessionConfiguration.default
+        // 资源超时默认 7 天：服务器挂起时 UI 会永远停在 0%，必须收紧。
+        configuration.timeoutIntervalForRequest = 60   // 连续 60s 无数据判失败
+        configuration.timeoutIntervalForResource = 3600 // 整包下载上限 1 小时
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         let task = session.downloadTask(with: assetURL)
-        let destination = try await withCheckedThrowingContinuation { continuation in
-            delegate.prepare(continuation: continuation)
-            task.resume()
+        do {
+            let destination = try await withCheckedThrowingContinuation { continuation in
+                delegate.prepare(continuation: continuation)
+                task.resume()
+            }
+            session.invalidateAndCancel()
+            return destination
+        } catch {
+            // 失败路径同样要 invalidate：URLSession 在 invalidate 前强持有 delegate，
+            // 跳过会形成 session↔delegate 保活泄漏。
+            session.invalidateAndCancel()
+            throw error
         }
-        session.invalidateAndCancel()
-        return destination
     }
 
     /// 挂载 DMG，用 ditto 取出卷内 .app 到 staging（保留扩展属性与符号链接），随后卸载。
@@ -78,12 +88,13 @@ enum UpdateInstaller {
     }
 
     /// 三层校验：① 新包签名完整有效；② 新旧包签名证书（Authority）一致；③ bundle id 一致。
+    /// bundle id 的真值来源以当前运行进程为准（常量仅作兜底），避免两处独立维护漂移后自更新静默失败。
     static func verify(newApp: URL, targetApp: URL) -> Bool {
         guard (try? run("/usr/bin/codesign", ["--verify", "--deep", "--strict", newApp.path])) != nil,
               let newAuthorities = signingAuthorities(of: newApp),
               let oldAuthorities = signingAuthorities(of: targetApp),
               newAuthorities == oldAuthorities,
-              bundleIdentifier(of: newApp) == appIdentifier
+              bundleIdentifier(of: newApp) == (Bundle.main.bundleIdentifier ?? appIdentifier)
         else { return false }
         return true
     }
@@ -101,6 +112,9 @@ enum UpdateInstaller {
     private static func bundleIdentifier(of app: URL) -> String? {
         Bundle(path: app.path)?.bundleIdentifier
     }
+
+    /// 更新辅助进程引用：持有至本进程退出，避免依赖 Process 内部自保活的实现细节。
+    nonisolated(unsafe) private static var pendingUpdaterProcess: Process?
 
     /// 启动更新辅助进程（同一二进制 --perform-update），随后调用方应立即退出本进程。
     static func launchUpdater(newApp: URL, targetApp: URL) throws {
@@ -120,6 +134,7 @@ enum UpdateInstaller {
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
+            pendingUpdaterProcess = process
         } catch {
             throw UpdateError.updaterLaunchFailed
         }
@@ -143,12 +158,19 @@ enum UpdateInstaller {
     }
 
     /// 等待原进程退出 → 内容级替换 Contents → 拉起新版本。
-    /// 任何失败都回滚或保持旧版不动，绝不留下半成品。
+    /// 任何失败都回滚或保持旧版不动，绝不留下半成品；
+    /// 失败路径尽力拉起旧版（主进程此刻即将退出，否则用户看到 App 凭空消失）。
     @discardableResult
     static func performUpdate(_ args: PerformUpdateArguments) -> Int32 {
         let fileManager = FileManager.default
-        guard waitForExit(pid: args.oldPID, timeout: 30) else { return 1 }
-        guard fileManager.isWritableFile(atPath: args.targetApp.path) else { return 2 }
+        guard waitForExit(pid: args.oldPID, timeout: 30) else {
+            relaunchTargetApp(args.targetApp)
+            return 1
+        }
+        guard fileManager.isWritableFile(atPath: args.targetApp.path) else {
+            relaunchTargetApp(args.targetApp)
+            return 2
+        }
 
         let contents = args.targetApp.appendingPathComponent("Contents", isDirectory: true)
         let backup = args.targetApp.appendingPathComponent("Contents.old", isDirectory: true)
@@ -158,6 +180,7 @@ enum UpdateInstaller {
             try? fileManager.removeItem(at: backup)
             try fileManager.moveItem(at: contents, to: backup)
         } catch {
+            relaunchTargetApp(args.targetApp)
             return 3
         }
 
@@ -167,6 +190,7 @@ enum UpdateInstaller {
             // 回滚：删除半成品，恢复旧 Contents
             try? fileManager.removeItem(at: contents)
             try? fileManager.moveItem(at: backup, to: contents)
+            relaunchTargetApp(args.targetApp)
             return 4
         }
 
@@ -175,9 +199,16 @@ enum UpdateInstaller {
         do {
             try run("/usr/bin/open", [args.targetApp.path])
         } catch {
+            // 新包已落位、backup 已删：open 失败时必须兜底拉起，否则 App 凭空消失。
+            relaunchTargetApp(args.targetApp)
             return 5
         }
         return 0
+    }
+
+    /// 尽力拉起旧版 App（失败静默，仅用于失败路径兜底）。
+    private static func relaunchTargetApp(_ targetApp: URL) {
+        _ = try? run("/usr/bin/open", [targetApp.path])
     }
 
     private static func waitForExit(pid: pid_t, timeout: TimeInterval) -> Bool {

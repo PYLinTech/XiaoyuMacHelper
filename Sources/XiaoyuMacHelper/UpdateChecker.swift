@@ -61,8 +61,6 @@ struct Version: Comparable, CustomStringConvertible, Sendable {
 
 /// api.pylin.cn/release 返回结构（只声明用到的字段，其余忽略）。
 struct UpdateAsset: Decodable, Sendable {
-    let name: String
-    let size: Int?
     let url: String
 }
 
@@ -100,18 +98,19 @@ enum UpdateChannel {
 
     static var fallbackReleaseURL: URL {
         let host = preferred == "gitee" ? "https://gitee.com" : "https://github.com"
-        return URL(string: "\(host)/\(repo)/releases")!
+        return URL(string: "\(host)/\(repo)/releases")
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
     }
 }
 
 enum UpdateChecker {
-    static var queryURL: URL {
-        var components = URLComponents(string: updateQueryURLString)!
-        components.queryItems = [
+    static var queryURL: URL? {
+        var components = URLComponents(string: updateQueryURLString)
+        components?.queryItems = [
             URLQueryItem(name: "repo", value: UpdateChannel.repo),
             URLQueryItem(name: "channel", value: UpdateChannel.preferred)
         ]
-        return components.url!
+        return components?.url
     }
 
     /// 当前运行应用的版本；读取失败返回 nil（视为无更新，不弹窗）。
@@ -122,6 +121,7 @@ enum UpdateChecker {
 
     /// 查询最新版本。网络或解析异常抛错；`ok != true` / 无版本 / 无下载资产视为无效。
     static func checkLatest() async throws -> UpdatePayload {
+        guard let queryURL else { throw UpdateError.badResponse }
         let (data, response) = try await URLSession.shared.data(from: queryURL)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw UpdateError.badResponse

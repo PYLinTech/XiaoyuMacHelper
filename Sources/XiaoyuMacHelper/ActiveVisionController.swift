@@ -27,6 +27,7 @@ final class ActiveVisionController {
     private var positiveHitCount = 0
     private var cachedDisplaySleepTimeout: TimeInterval?
     private var lastDisplaySleepTimeoutRefreshDate: Date?
+    private var isRefreshingDisplaySleepTimeout = false
     private var virtualDisplaySleepDeadlineDate: Date?
     private let toastWindow = ToastWindow()
     private let powerManager = ActiveVisionPowerManager()
@@ -108,8 +109,6 @@ final class ActiveVisionController {
             stop()
             return
         }
-
-        powerManager.releaseExpiredIfNeeded()
 
         let timingInfo = currentTimingInfo()
 
@@ -232,7 +231,7 @@ final class ActiveVisionController {
 
     private func currentTimingInfo() -> TimingInfo? {
         guard let displaySleepTimeout = currentDisplaySleepTimeout(), displaySleepTimeout > 0,
-              let realIdleTime = currentUserIdleTime() else {
+              let realIdleTime = ActiveVisionTiming.currentUserIdleTime() else {
             return nil
         }
 
@@ -276,18 +275,31 @@ final class ActiveVisionController {
             return cachedDisplaySleepTimeout
         }
 
-        let timeout = readDisplaySleepTimeoutFromPMSet()
-        cachedDisplaySleepTimeout = timeout
-        lastDisplaySleepTimeoutRefreshDate = now
-        return timeout
+        // pmset 子进程读取放后台：缓存过期瞬间先返回旧值，
+        // 避免在主线程同步等待 fork/exec（典型几十毫秒，poll 周期才 0.2s）。
+        refreshDisplaySleepTimeoutAsync()
+        return cachedDisplaySleepTimeout
     }
 
-    private func readDisplaySleepTimeoutFromPMSet() -> TimeInterval? {
-        ActiveVisionTiming.readDisplaySleepTimeoutFromPMSet()
-    }
+    private func refreshDisplaySleepTimeoutAsync() {
+        guard !isRefreshingDisplaySleepTimeout else {
+            return
+        }
 
-    private func currentUserIdleTime() -> TimeInterval? {
-        ActiveVisionTiming.currentUserIdleTime()
+        isRefreshingDisplaySleepTimeout = true
+        Task { [weak self] in
+            let timeout = await Task.detached(priority: .utility) {
+                ActiveVisionTiming.readDisplaySleepTimeoutFromPMSet()
+            }.value
+
+            guard let self else {
+                return
+            }
+
+            self.isRefreshingDisplaySleepTimeout = false
+            self.cachedDisplaySleepTimeout = timeout
+            self.lastDisplaySleepTimeoutRefreshDate = Date()
+        }
     }
 
     @discardableResult

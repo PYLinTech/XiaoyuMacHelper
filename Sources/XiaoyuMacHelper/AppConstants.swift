@@ -38,6 +38,7 @@ let menuBarLyricsEnabledKey = "MenuBarLyricsEnabled"
 let menuBarLyricsWidthKey = "MenuBarLyricsWidth"
 let menuBarLyricsAlignmentKey = "MenuBarLyricsAlignment"
 let desktopLyricsSourceOrderKey = "DesktopLyricsSourceOrder"
+let desktopLyricsEnabledSourcesKey = "EnabledDesktopLyricsSources"
 let desktopLyricsPreferredLanguageKey = "DesktopLyricsPreferredLanguage"
 let desktopLyricsShowsTranslationKey = "DesktopLyricsShowsTranslation"
 let desktopLyricsFontSizeKey = "DesktopLyricsFontSize"
@@ -50,17 +51,20 @@ let desktopLyricsPositionYKey = "DesktopLyricsPositionY"
 let desktopLyricsLockedKey = "DesktopLyricsLocked"
 let desktopLyricsStylePresetKey = "DesktopLyricsStylePreset"
 let musicLyricsAppWhitelistKey = "MusicLyricsAppWhitelist"
+/// 应用白名单"显式清空"哨兵值：与空串（跟随默认白名单）语义不同，存储层与
+/// UI/过滤层多处共用，单一来源避免字面量漂移。
+let musicLyricsAppWhitelistEmptySentinel = "__empty__"
 let appleMusicMediaUserTokenKey = "AppleMusicMediaUserToken"
 let activeVisionPreventDisplaySleepOnGazeKey = "ActiveVisionPreventDisplaySleepOnGaze"
 let activeVisionPreventDisplaySleepOnFacingKey = "ActiveVisionPreventDisplaySleepOnFacing"
 let activeVisionNotifyWhenExtendingDisplaySleepKey = "ActiveVisionNotifyWhenExtendingDisplaySleep"
 let activeVisionLeadTimeBeforeDisplaySleep: TimeInterval = 30
 let selectionToolbarDefaultOffMigrationKey = "SelectionToolbarDefaultOffMigrationDone"
+let slideshowAnnotationEnabledKey = "SlideshowAnnotationEnabled"
 
 // 自更新
 let updatePerformFlag = "--perform-update"
 let updateQueryURLString = "https://api.pylin.cn/release"
-let updateRepo = "PYLinTech/XiaoyuMacHelper"
 let updateRootDirectoryName = "XiaoyuMacHelper"
 let updatesDirectoryName = "Updates"
 

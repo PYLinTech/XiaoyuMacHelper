@@ -40,6 +40,7 @@ private actor SystemNowPlayingReader {
 
     private let minimumFetchInterval: TimeInterval = 0.25
     private let maximumStaleInterval: TimeInterval = 3.0
+    private static let processTimeout: TimeInterval = 5.0
     private var lastSnapshot: Snapshot?
     private var inFlightFetch: Task<JavaScriptResult, Never>?
 
@@ -142,9 +143,21 @@ private actor SystemNowPlayingReader {
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return JavaScriptResult(stdout: "", stderr: String(describing: error), exitStatus: -1)
+        }
+
+        // 轮询链依赖本次调用返回（inFlightFetch 去重期间所有后续查询都在等它），
+        // osascript 万一挂起必须强制了结，否则歌词轮询从此卡死。
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        if exited.wait(timeout: .now() + Self.processTimeout) == .timedOut {
+            process.terminate()
+            if exited.wait(timeout: .now() + 1.0) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                _ = exited.wait(timeout: .now() + 1.0)
+            }
+            return JavaScriptResult(stdout: "", stderr: "osascript timed out after \(Self.processTimeout)s", exitStatus: -2)
         }
 
         let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -191,6 +204,8 @@ function run() {
 
   try {
     const mediaRemote = $.NSBundle.bundleWithPath('/System/Library/PrivateFrameworks/MediaRemote.framework/');
+    // JXA 桥对返回 BOOL 的零参方法（-load）暴露为属性而非函数：
+    // 属性读取即调用 load 并返回 true；写成 load() 会抛 TypeError 使脚本每次轮询必败。
     if (mediaRemote) mediaRemote.load;
 
     const requestClass = $.NSClassFromString('MRNowPlayingRequest');

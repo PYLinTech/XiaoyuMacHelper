@@ -190,7 +190,10 @@ final class SelectionToolbarController {
 
     /// 任意键盘输入或点击本 app 其他窗口 → 收起工具栏并清空选区状态。
     private func hideForExternalInput() {
-        guard isEnabled, toolbarWindow.isVisible else { return }
+        guard isEnabled else { return }
+        // 工具栏尚未弹出但有 80ms 延迟显示计划时也要取消，
+        // 否则用户开始打字后工具栏会"迟到"弹出并留在原地。
+        guard toolbarWindow.isVisible || pendingShow != nil else { return }
         reset(shouldHideToolbar: true, clearTarget: true)
     }
 
@@ -285,7 +288,8 @@ final class SelectionToolbarController {
         case .search:
             copySelectionAndSearch(targetPID: pid)
         case .screenshot:
-            captureSelection(rect)
+            // 自身选区截图：工具栏在 reset 时已立即隐藏，无需额外处理。
+            captureSelection(rect, onSessionEnd: nil)
         }
     }
 
@@ -301,32 +305,96 @@ final class SelectionToolbarController {
         }
     }
 
-    private func captureSelection(_ rect: CGRect?) {
-        guard let rect, rect.width >= 1, rect.height >= 1 else {
-            showToast("截图区域无效")
-            return
-        }
+    /// 截图会话互斥标志：选区/批注会话进行中禁止再次进入。多屏下会话进行中
+    /// （覆盖层只盖一块屏）另一屏再触发会复用同一选区窗口、旧批注窗口不关闭，
+    /// 产生双全屏层叠与回调覆盖。
+    private var isScreenshotSessionActive = false
 
+    private func captureSelection(_ rect: CGRect?, onSessionEnd sessionEnd: (() -> Void)?) {
+        guard !isScreenshotSessionActive else { return }
+        isScreenshotSessionActive = true
+        // 终态回调（确认/取消/失败/权限缺失）恰好一次时解除互斥。
+        captureSelectionLocked(rect) { [weak self] in
+            self?.isScreenshotSessionActive = false
+            sessionEnd?()
+        }
+    }
+
+    private func captureSelectionLocked(_ rect: CGRect?, onSessionEnd sessionEnd: (() -> Void)?) {
         if currentSettings.screenshotSelectsRegion {
-            captureFullScreenForRegionSelection(initialRect: rect)
+            captureFullScreenForRegionSelection(initialRect: rect, onSessionEnd: sessionEnd)
             return
         }
 
-        guard let captureRect = Self.screenCaptureRect(fromAppKitRect: rect) else {
+        // 非框选模式：无坐标（工具栏调用不传区域）→ 捕获所在屏全屏。
+        let targetRect: NSRect
+        if let rect, rect.width >= 1, rect.height >= 1 {
+            targetRect = rect
+        } else if let screen = NSScreen.main ?? NSScreen.screens.first {
+            targetRect = screen.frame
+        } else {
             showToast("截图区域无效")
+            sessionEnd?()
+            return
+        }
+
+        guard let captureRect = Self.screenCaptureRect(fromAppKitRect: targetRect) else {
+            showToast("截图区域无效")
+            sessionEnd?()
             return
         }
 
         captureImage(in: captureRect) { [weak self] image in
             self?.finishScreenshot(image)
+            sessionEnd?()
+        } onFailure: {
+            sessionEnd?()
         }
     }
 
-    private func captureFullScreenForRegionSelection(initialRect rect: CGRect) {
-        let appKitRect = NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)
+    // MARK: 外部复用（放映批注截图工具）
+
+    /// 供放映批注截图工具直接调用的截图入口：与选区截图按钮走完全相同的链路
+    /// （依「框选区域」设置决定整屏框选或直接捕获，收尾按设置复制/落盘并提示）。
+    /// - Parameters:
+    ///   - rect: 初始截图区域（AppKit 全局坐标，左下原点）；传 `nil` 表示不指定
+    ///     区域——框选模式下按默认选区（所在屏宽高 60% 居中）框选，非框选模式
+    ///     直接捕获所在屏全屏。屏幕取 `NSScreen.main`（工具栏调用即无具体屏幕）。
+    ///   - onSessionEnd: 截图会话**终态回调**——确认落盘、取消、捕获失败、
+    ///     权限缺失等任一终态恰好调用一次，供调用方恢复截图前临时隐藏的浮层。
+    func captureScreenshot(
+        appKitRect rect: NSRect?,
+        onSessionEnd sessionEnd: (() -> Void)? = nil
+    ) {
+        captureSelection(rect, onSessionEnd: sessionEnd)
+    }
+
+    private func captureFullScreenForRegionSelection(
+        initialRect rect: CGRect?,
+        onSessionEnd sessionEnd: (() -> Void)? = nil
+    ) {
+        // 选区：优先用调用方给定区域；未给定时按默认选区——所在屏宽高的
+        // 60%、屏幕居中（工具栏调用即不传区域）。
+        let appKitRect: NSRect
+        if let rect, rect.width >= 1, rect.height >= 1 {
+            appKitRect = rect
+        } else if let screen = NSScreen.main ?? NSScreen.screens.first {
+            let frame = screen.frame
+            appKitRect = NSRect(
+                x: frame.midX - frame.width * 0.3,
+                y: frame.midY - frame.height * 0.3,
+                width: frame.width * 0.6,
+                height: frame.height * 0.6
+            )
+        } else {
+            showToast("截图区域无效")
+            sessionEnd?()
+            return
+        }
         guard let screen = Self.screen(containing: appKitRect),
               let fullScreenCaptureRect = Self.screenCaptureRect(fromAppKitRect: screen.frame) else {
             showToast("截图区域无效")
+            sessionEnd?()
             return
         }
         let screenFrame = screen.frame
@@ -347,30 +415,44 @@ final class SelectionToolbarController {
                 initialSelection: localSelection,
                 onConfirm: { [weak self] croppedImage in
                     self?.finishScreenshot(croppedImage)
+                    sessionEnd?()
                 },
                 onFailure: { [weak self] in
                     self?.showToast("截图失败")
+                    sessionEnd?()
                 },
-                onCancel: {}
+                onCancel: {
+                    sessionEnd?()
+                }
             )
+        } onFailure: {
+            sessionEnd?()
         }
     }
 
-    private func captureImage(in rect: CGRect, completion: @MainActor @Sendable @escaping (CGImage) -> Void) {
+    private func captureImage(
+        in rect: CGRect,
+        completion: @MainActor @Sendable @escaping (CGImage) -> Void,
+        onFailure: @MainActor @Sendable @escaping () -> Void
+    ) {
         guard Self.hasScreenCapturePermission() else {
             CGRequestScreenCaptureAccess()
             showToast("请在系统设置中允许屏幕录制权限后重试")
+            onFailure()
             return
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // 通用兼容方案：CGWindowListCreateImage（macOS 10.5+ 全版本可用），
-            // 直接捕获屏幕指定区域（CGDisplay 全局坐标空间，左上原点）。
+            // 内置 500ms 缓冲：捕获 API 返回「最近合成帧」，刚 orderOut 的本方
+            // 浮层（选区工具栏/放映批注浮层等）像素仍可能残留入镜；统一等待
+            // 离屏在窗口服务器生效后再捕获，对所有截图路径全局生效。
+            Thread.sleep(forTimeInterval: 0.5)
             let image = ScreenCaptureShim.captureWindowListImage(in: rect)
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard let image else {
                     self.showToast("截图失败")
+                    onFailure()
                     return
                 }
                 completion(image)
@@ -404,41 +486,45 @@ final class SelectionToolbarController {
         }
     }
 
-    private static func screenCaptureRect(fromAppKitRect rect: CGRect) -> CGRect? {
-        let appKitRect = NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)
-        guard let screen = screen(containing: appKitRect),
-              let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+    /// AppKit 矩形（左下原点）→ CG 捕获矩形（所在屏全局坐标，左上原点）。
+    /// 放映批注的截图链路经 captureScreenshot 间接共享本换算，坐标语义保持一致。
+    static func screenCaptureRect(fromAppKitRect rect: CGRect) -> CGRect? {
+        guard let screen = screen(containing: rect) else {
             return nil
         }
 
-        let clippedRect = appKitRect.intersection(screen.frame)
+        let clippedRect = rect.intersection(screen.frame)
         guard clippedRect.width >= 1, clippedRect.height >= 1 else {
             return nil
         }
 
-        let displayBounds = CGDisplayBounds(displayID)
-        return CGRect(
-            x: displayBounds.minX + clippedRect.minX - screen.frame.minX,
-            y: displayBounds.minY + screen.frame.maxY - clippedRect.maxY,
-            width: clippedRect.width,
-            height: clippedRect.height
-        )
+        // 左上角（AppKit 的 minX/maxY）决定 CG 矩形原点，宽高不变。
+        guard let origin = ScreenCaptureShim.cgPoint(
+            fromAppKit: NSPoint(x: clippedRect.minX, y: clippedRect.maxY),
+            on: screen
+        ) else {
+            return nil
+        }
+        return CGRect(origin: origin, size: clippedRect.size)
     }
 
-    private static func screen(containing rect: NSRect) -> NSScreen? {
+    /// 包含给定矩形（相交面积最大）的屏幕（screenCaptureRect 内部使用）。
+    static func screen(containing rect: NSRect) -> NSScreen? {
         NSScreen.screens
             .filter { $0.frame.intersects(rect) }
             .max { $0.frame.intersection(rect).area < $1.frame.intersection(rect).area }
     }
 
-    private static func copyScreenshotToPasteboard(_ image: CGImage) {
+    /// 复制截图到剪贴板（finishScreenshot 收尾步骤；放映自建「截图」工具
+    /// 经 captureScreenshot → captureSelection 链路间接共用）。
+    static func copyScreenshotToPasteboard(_ image: CGImage) {
         let nsImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.writeObjects([nsImage])
     }
 
-    nonisolated private static func saveScreenshot(_ image: CGImage, toDirectoryAt path: String) throws -> URL {
+    nonisolated static func saveScreenshot(_ image: CGImage, toDirectoryAt path: String) throws -> URL {
         let directoryURL = path.isEmpty ? defaultScreenshotDirectoryURL() : URL(fileURLWithPath: path, isDirectory: true)
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
@@ -453,7 +539,7 @@ final class SelectionToolbarController {
         return fileURL
     }
 
-    nonisolated private static func uniqueScreenshotURL(in directory: URL, timestamp: String) -> URL {
+    nonisolated static func uniqueScreenshotURL(in directory: URL, timestamp: String) -> URL {
         let baseName = "截图\(timestamp)"
         var candidate = directory.appendingPathComponent("\(baseName).png")
         var index = 2
@@ -473,7 +559,7 @@ final class SelectionToolbarController {
 
             let pasteboard = NSPasteboard.general
             let beforeChangeCount = pasteboard.changeCount
-            _ = await Self.postCommandShortcut(CGKeyCode(kVK_ANSI_C))
+            await Self.postCommandShortcut(CGKeyCode(kVK_ANSI_C))
 
             DispatchQueue.main.asyncAfter(deadline: .now() + Metrics.searchReadDelay) { [weak self] in
                 guard let self else { return }
@@ -518,7 +604,7 @@ final class SelectionToolbarController {
             return
         }
 
-        app.activate(options: [])
+        app.activate()
         let deadline = Date().addingTimeInterval(0.8)
         while !app.isActive
             && NSWorkspace.shared.frontmostApplication?.processIdentifier != pid
@@ -596,37 +682,6 @@ final class SelectionToolbarController {
         }
         event.flags = flags
         event.post(tap: .cghidEventTap)
-    }
-}
-
-/// 通用截图 shim：CGWindowListCreateImage 自 macOS 10.5 起存在，
-/// 但 macOS 15 SDK 将其标记为 obsoleted，编译期不可直接调用。
-/// 运行时符号始终存在，通过 dlsym 动态解析，获得跨系统版本的通用截图能力。
-private enum ScreenCaptureShim {
-    private typealias CaptureFn = @convention(c) (
-        CGRect,
-        UInt32,
-        UInt32,
-        UInt32
-    ) -> Unmanaged<CGImage>?
-
-    private static let capture: CaptureFn? = {
-        // CoreGraphics 为常驻系统框架，dlopen 后不关闭，符号在进程生命周期内有效。
-        guard let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY) else { return nil }
-        guard let symbol = dlsym(handle, "CGWindowListCreateImage") else { return nil }
-        return unsafeBitCast(symbol, to: CaptureFn.self)
-    }()
-
-    /// 捕获屏幕全局坐标（左上原点）中 rect 区域的画面，返回全分辨率图像。
-    static func captureWindowListImage(in rect: CGRect) -> CGImage? {
-        guard let capture else { return nil }
-        let image = capture(
-            rect,
-            CGWindowListOption.optionAll.rawValue,
-            kCGNullWindowID,
-            CGWindowImageOption.bestResolution.rawValue | CGWindowImageOption.boundsIgnoreFraming.rawValue
-        )
-        return image?.takeRetainedValue()
     }
 }
 

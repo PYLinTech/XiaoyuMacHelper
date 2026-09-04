@@ -14,12 +14,8 @@ private final class CameraPermissionCompletionBox: @unchecked Sendable {
 }
 
 enum CameraPermission {
-    static var status: AVAuthorizationStatus {
-        AVCaptureDevice.authorizationStatus(for: .video)
-    }
-
     static var isAuthorized: Bool {
-        status == .authorized
+        AVCaptureDevice.authorizationStatus(for: .video) == .authorized
     }
 
     static func request(_ completion: @escaping (Bool) -> Void) {

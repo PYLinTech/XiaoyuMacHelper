@@ -10,10 +10,8 @@ struct DesktopLyricsSearchResult: Sendable {
 
 final class DesktopLyricsSearchService: @unchecked Sendable {
     private let providers: [DesktopLyricsProvider]
-    private let preferredLanguage: DesktopLyricsPreferredLanguage
 
     init(settings: AppSettings) {
-        preferredLanguage = settings.desktopLyricsPreferredLanguage
         let enabledSources = Set(settings.enabledDesktopLyricsSources)
         providers = settings.desktopLyricsSourceOrder.filter { enabledSources.contains($0) }.map { source -> DesktopLyricsProvider in
             switch source {
@@ -58,6 +56,8 @@ enum LyricsNetwork {
     static func getData(url: URL, referer: String? = nil, extraHeaders: [String: String] = [:]) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        // 串行 provider 回退链上默认 60s 超时会让一首歌最长阻塞数分钟，统一收紧。
+        request.timeoutInterval = 10
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("application/json,text/plain,*/*", forHTTPHeaderField: "Accept")
         if let referer { request.setValue(referer, forHTTPHeaderField: "Referer") }
@@ -68,6 +68,7 @@ enum LyricsNetwork {
     static func postJSON(url: URL, json: Any, referer: String? = nil, extraHeaders: [String: String] = [:]) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 10
         request.httpBody = try JSONSerialization.data(withJSONObject: json, options: [])
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -80,6 +81,7 @@ enum LyricsNetwork {
     static func postForm(url: URL, form: [String: String], referer: String? = nil, extraHeaders: [String: String] = [:]) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 10
         request.httpBody = form
             .map { "\(escape($0.key))=\(escape($0.value))" }
             .joined(separator: "&")
@@ -146,8 +148,8 @@ private final class QQMusicLyricsProvider: DesktopLyricsProvider, @unchecked Sen
         let dictionary = try LyricsNetwork.jsonDictionary(from: data)
         let list = (((dictionary["req_1"] as? [String: Any])?["data"] as? [String: Any])?["body"] as? [String: Any])?["song"] as? [String: Any]
         let songs = list?["list"] as? [[String: Any]] ?? []
-        return bestMatch(in: songs, track: track)?["mid"] as? String
-            ?? bestMatch(in: songs, track: track)?["songmid"] as? String
+        let matched = bestMatch(in: songs, track: track)
+        return matched?["mid"] as? String ?? matched?["songmid"] as? String
     }
 
     private func fetchLyrics(songMid: String) async throws -> [DesktopLyricLine] {
@@ -283,7 +285,8 @@ private final class AppleMusicLyricsProvider: DesktopLyricsProvider, @unchecked 
     private let mediaUserToken: String
     private let preferredLanguage: DesktopLyricsPreferredLanguage
     private var accessToken: String?
-    private var storefront = "us"
+    /// nil = 尚未解析（ensureInitialized 时一次性获取），使用前回落 "us"。
+    private var storefront: String?
 
     init(mediaUserToken: String, preferredLanguage: DesktopLyricsPreferredLanguage) {
         self.mediaUserToken = mediaUserToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -302,6 +305,9 @@ private final class AppleMusicLyricsProvider: DesktopLyricsProvider, @unchecked 
         }
 
         guard !mediaUserToken.isEmpty else { return }
+        // storefront 与 accessToken 一并缓存：仅首次解析一次，
+        // 每首歌都打一次 /me/storefront 是纯浪费的网络往返。
+        guard storefront == nil else { return }
         do {
             let headers = try authHeaders()
             let data = try await LyricsNetwork.getData(
@@ -310,16 +316,14 @@ private final class AppleMusicLyricsProvider: DesktopLyricsProvider, @unchecked 
                 extraHeaders: headers
             )
             let dictionary = try LyricsNetwork.jsonDictionary(from: data)
-            if let first = (dictionary["data"] as? [[String: Any]])?.first {
-                storefront = (first["id"] as? String) ?? storefront
-            }
+            storefront = ((dictionary["data"] as? [[String: Any]])?.first?["id"] as? String) ?? "us"
         } catch {
             storefront = "us"
         }
     }
 
     private func searchSongId(for track: DesktopLyricsTrack) async throws -> String? {
-        var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(storefront)/search")!
+        var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(storefront ?? "us")/search")!
         components.queryItems = [
             URLQueryItem(name: "term", value: track.searchKeyword),
             URLQueryItem(name: "types", value: "songs"),
@@ -341,7 +345,7 @@ private final class AppleMusicLyricsProvider: DesktopLyricsProvider, @unchecked 
         var fallbackLines: [DesktopLyricLine] = []
 
         for languageTag in preferredLanguage.appleMusicLyricsLanguageCandidates {
-            var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(storefront)/songs/\(songId)/syllable-lyrics")!
+            var components = URLComponents(string: "https://amp-api.music.apple.com/v1/catalog/\(storefront ?? "us")/songs/\(songId)/syllable-lyrics")!
             components.queryItems = [
                 URLQueryItem(name: "l", value: languageTag),
                 URLQueryItem(name: "extend", value: "ttmlLocalizations")
