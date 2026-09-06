@@ -61,6 +61,8 @@ let activeVisionNotifyWhenExtendingDisplaySleepKey = "ActiveVisionNotifyWhenExte
 let activeVisionLeadTimeBeforeDisplaySleep: TimeInterval = 30
 let selectionToolbarDefaultOffMigrationKey = "SelectionToolbarDefaultOffMigrationDone"
 let slideshowAnnotationEnabledKey = "SlideshowAnnotationEnabled"
+let miscMouseWheelInvertedKey = "MiscMouseWheelInverted"
+let miscMouseSideButtonsForwardBackEnabledKey = "MiscMouseSideButtonsForwardBackEnabled"
 
 // 自更新
 let updatePerformFlag = "--perform-update"

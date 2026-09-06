@@ -21,6 +21,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
     private lazy var activeVisionController = ActiveVisionController(settings: currentSettings)
     private lazy var desktopLyricsController = DesktopLyricsController(settings: currentSettings)
     private lazy var slideshowAnnotationController = SlideshowAnnotationController(settings: currentSettings)
+    private lazy var miscController = MiscController(settings: currentSettings)
     private lazy var controlWindow = ControlWindow()
     private var pollTimer: Timer?
     private var statusPollTimer: Timer?
@@ -55,6 +56,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         activeVisionController.start()
         desktopLyricsController.start()
         slideshowAnnotationController.start()
+        miscController.start()
         updateCapsLockPolling()
         updateCapsLockWindow(force: true)
         if launchMode.isUserInitiatedLaunch {
@@ -72,6 +74,8 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         controlWindow.controlView.onActiveVisionChanged = { [weak self] isEnabled in self?.setActiveVisionEnabled(isEnabled) }
         controlWindow.controlView.onDesktopLyricsChanged = { [weak self] isEnabled in self?.setDesktopLyricsEnabled(isEnabled) }
         controlWindow.controlView.onSlideshowAnnotationChanged = { [weak self] isEnabled in self?.setSlideshowAnnotationEnabled(isEnabled) }
+        controlWindow.controlView.onMouseWheelInvertChanged = { [weak self] isInverted in self?.setMiscMouseWheelInverted(isInverted) }
+        controlWindow.controlView.onMiscMouseSideButtonsForwardBackChanged = { [weak self] isEnabled in self?.setMiscMouseSideButtonsForwardBackEnabled(isEnabled) }
         controlWindow.controlView.onSelectionToolbarActionChanged = { [weak self] action, isEnabled in self?.setSelectionToolbarAction(action, enabled: isEnabled) }
         controlWindow.controlView.onSelectionToolbarActionMoved = { [weak self] action, direction in self?.moveSelectionToolbarAction(action, direction: direction) }
         controlWindow.controlView.onDesktopLyricsSourceMoved = { [weak self] source, direction in self?.moveDesktopLyricsSource(source, direction: direction) }
@@ -312,6 +316,7 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         activeVisionController.stop()
         desktopLyricsController.stop()
         slideshowAnnotationController.stop()
+        miscController.stop()
         instanceLock.releaseLock()
     }
 
@@ -591,6 +596,45 @@ final class XiaoyuMacHelperApp: NSObject, NSApplicationDelegate {
         currentSettings.isSlideshowAnnotationEnabled = isEnabled
         renderControlWindow(force: true)
         slideshowAnnotationController.update(settings: currentSettings)
+    }
+
+    private func setMiscMouseWheelInverted(_ isInverted: Bool) {
+        settingsStore.setMiscMouseWheelInverted(isInverted)
+        currentSettings.isMiscMouseWheelInverted = isInverted
+        applyMiscMouseSettings()
+    }
+
+    private func setMiscMouseSideButtonsForwardBackEnabled(_ isEnabled: Bool) {
+        settingsStore.setMiscMouseSideButtonsForwardBackEnabled(isEnabled)
+        currentSettings.isMiscMouseSideButtonsForwardBackEnabled = isEnabled
+        applyMiscMouseSettings()
+    }
+
+    /// 鼠标组共用刷新：事件拦截与键盘模拟依赖辅助功能权限，开启任一开关时
+    /// 守卫权限——未授权则回滚该开关并弹窗引导（与选区工具栏同一模式）。
+    private func applyMiscMouseSettings() {
+        if currentSettings.isMiscMouseWheelInverted || currentSettings.isMiscMouseSideButtonsForwardBackEnabled {
+            guard AccessibilityPermission.isTrusted() else {
+                if currentSettings.isMiscMouseWheelInverted {
+                    settingsStore.setMiscMouseWheelInverted(false)
+                    currentSettings.isMiscMouseWheelInverted = false
+                }
+                if currentSettings.isMiscMouseSideButtonsForwardBackEnabled {
+                    settingsStore.setMiscMouseSideButtonsForwardBackEnabled(false)
+                    currentSettings.isMiscMouseSideButtonsForwardBackEnabled = false
+                }
+                renderControlWindow(force: true)
+                AlertPresenter.show(
+                    title: "请先授权辅助功能",
+                    message: "鼠标功能需要使用辅助功能权限拦截事件，请先在工具选项开启辅助功能。",
+                    style: .warning
+                )
+                return
+            }
+        }
+
+        renderControlWindow(force: true)
+        miscController.update(settings: currentSettings)
     }
 
     private func openAppleMusicLogin() {

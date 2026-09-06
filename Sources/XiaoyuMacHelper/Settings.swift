@@ -219,6 +219,8 @@ struct AppSettings: Equatable, Sendable {
     var activeVisionPreventsDisplaySleepOnFacing: Bool
     var activeVisionNotifiesWhenExtendingDisplaySleep: Bool
     var isSlideshowAnnotationEnabled: Bool
+    var isMiscMouseWheelInverted: Bool
+    var isMiscMouseSideButtonsForwardBackEnabled: Bool
 
     var visibleSelectionToolbarActions: [ToolbarAction] {
         selectionToolbarOrder.filter(isSelectionToolbarActionEnabled)
@@ -317,7 +319,9 @@ final class SettingsStore {
             activeVisionPreventDisplaySleepOnGazeKey: true,
             activeVisionPreventDisplaySleepOnFacingKey: true,
             activeVisionNotifyWhenExtendingDisplaySleepKey: true,
-            slideshowAnnotationEnabledKey: false
+            slideshowAnnotationEnabledKey: false,
+            miscMouseWheelInvertedKey: false,
+            miscMouseSideButtonsForwardBackEnabledKey: false
         ])
 
         if !defaults.bool(forKey: selectionToolbarDefaultOffMigrationKey) {
@@ -403,7 +407,9 @@ final class SettingsStore {
             activeVisionPreventsDisplaySleepOnGaze: defaults.bool(forKey: activeVisionPreventDisplaySleepOnGazeKey),
             activeVisionPreventsDisplaySleepOnFacing: defaults.bool(forKey: activeVisionPreventDisplaySleepOnFacingKey),
             activeVisionNotifiesWhenExtendingDisplaySleep: defaults.bool(forKey: activeVisionNotifyWhenExtendingDisplaySleepKey),
-            isSlideshowAnnotationEnabled: defaults.bool(forKey: slideshowAnnotationEnabledKey)
+            isSlideshowAnnotationEnabled: defaults.bool(forKey: slideshowAnnotationEnabledKey),
+            isMiscMouseWheelInverted: defaults.bool(forKey: miscMouseWheelInvertedKey),
+            isMiscMouseSideButtonsForwardBackEnabled: defaults.bool(forKey: miscMouseSideButtonsForwardBackEnabledKey)
         )
     }
 
@@ -606,6 +612,14 @@ final class SettingsStore {
 
     func setSlideshowAnnotationEnabled(_ isEnabled: Bool) {
         defaults.set(isEnabled, forKey: slideshowAnnotationEnabledKey)
+    }
+
+    func setMiscMouseWheelInverted(_ isInverted: Bool) {
+        defaults.set(isInverted, forKey: miscMouseWheelInvertedKey)
+    }
+
+    func setMiscMouseSideButtonsForwardBackEnabled(_ isEnabled: Bool) {
+        defaults.set(isEnabled, forKey: miscMouseSideButtonsForwardBackEnabledKey)
     }
 
     func clearPersistentData() {

@@ -15,6 +15,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         case musicLyricsWhitelistSettings
         case searchSettings
         case screenshotSettings
+        case miscSettings
     }
 
     private enum Metrics {
@@ -64,6 +65,8 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let activeVisionCheckbox = NSButton(checkboxWithTitle: "主动视觉感知", target: nil, action: nil)
     private let desktopLyricsCheckbox = NSButton(checkboxWithTitle: "音乐歌词", target: nil, action: nil)
     private let slideshowAnnotationCheckbox = NSButton(checkboxWithTitle: "幻灯片批注", target: nil, action: nil)
+    /// 杂项为容器模块（无勾选态），行上仅显示名称与二级设置入口。
+    private let miscRowLabel = NSTextField(labelWithString: "杂项")
     private let clickToDisableCheckbox = NSButton(checkboxWithTitle: "点击指示器取消大写", target: nil, action: nil)
     private let selectionToolbarSettingTitle = NSTextField(labelWithString: "设置")
     private let selectionToolbarHideInFullscreenCheckbox = NSButton(checkboxWithTitle: "全屏时隐藏选区工具栏", target: nil, action: nil)
@@ -74,6 +77,7 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let desktopLyricsSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     /// 幻灯片批注无独立设置页，占位以复用模块行布局，始终隐藏。
     private let slideshowAnnotationSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
+    private let miscSettingsButton = IconButtonView(systemSymbolName: "gearshape", accessibilityDescription: "杂项设置", backgroundStyle: .plain, tintColor: .secondaryLabelColor)
     private let backButton = IconButtonView(systemSymbolName: "chevron.left", accessibilityDescription: "返回", backgroundStyle: .glass)
     private let loginItemButton = NSButton(title: "前往设置启动项", target: nil, action: nil)
     private let accessibilityButton = NSButton(title: "前往设置辅助功能", target: nil, action: nil)
@@ -93,6 +97,9 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     private let activeVisionGazeCheckbox = NSButton(checkboxWithTitle: "注视屏幕时不要息屏", target: nil, action: nil)
     private let activeVisionFacingCheckbox = NSButton(checkboxWithTitle: "面向屏幕时不要息屏", target: nil, action: nil)
     private let activeVisionNotifyCheckbox = NSButton(checkboxWithTitle: "延迟息屏时通知", target: nil, action: nil)
+    private let miscMouseGroupTitle = NSTextField(labelWithString: "鼠标")
+    private let mouseWheelInvertCheckbox = NSButton(checkboxWithTitle: "滚轮反向（部分场景无效）", target: nil, action: nil)
+    private let miscSideButtonsForwardBackCheckbox = NSButton(checkboxWithTitle: "侧键映射前进/后退（⌘[ / ⌘]）", target: nil, action: nil)
     private let desktopLyricsHintLabel = NSTextField(labelWithString: "")
     private let desktopLyricsLanguageLabel = NSTextField(labelWithString: "首选语言：")
     private let desktopLyricsLanguagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -178,6 +185,8 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
     var onActiveVisionChanged: ((Bool) -> Void)?
     var onDesktopLyricsChanged: ((Bool) -> Void)?
     var onSlideshowAnnotationChanged: ((Bool) -> Void)?
+    var onMouseWheelInvertChanged: ((Bool) -> Void)?
+    var onMiscMouseSideButtonsForwardBackChanged: ((Bool) -> Void)?
     var onSelectionToolbarActionChanged: ((ToolbarAction, Bool) -> Void)?
     var onSelectionToolbarActionMoved: ((ToolbarAction, Int) -> Void)?
     var onDesktopLyricsSourceMoved: ((DesktopLyricsSource, Int) -> Void)?
@@ -249,6 +258,8 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         activeVisionCheckbox.state = settings.isActiveVisionEnabled ? .on : .off
         desktopLyricsCheckbox.state = settings.isDesktopLyricsEnabled ? .on : .off
         slideshowAnnotationCheckbox.state = settings.isSlideshowAnnotationEnabled ? .on : .off
+        mouseWheelInvertCheckbox.state = settings.isMiscMouseWheelInverted ? .on : .off
+        miscSideButtonsForwardBackCheckbox.state = settings.isMiscMouseSideButtonsForwardBackEnabled ? .on : .off
         clickToDisableCheckbox.state = settings.isClickToDisableEnabled ? .on : .off
         selectAllRow.setEnabled(settings.isSelectionToolbarSelectAllEnabled)
         copyRow.setEnabled(settings.isSelectionToolbarCopyEnabled)
@@ -326,12 +337,17 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         settingsContentView.addSubview(selectionToolbarSettingTitle)
         settingsContentView.addSubview(selectionToolbarOrderTitle)
 
-        [capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, slideshowAnnotationSettingsButton, backButton].forEach { addSubview($0) }
+        [capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, slideshowAnnotationSettingsButton, miscSettingsButton, backButton].forEach { addSubview($0) }
+        // 杂项行无勾选态，用标签代替 checkbox：样式对齐模块行 checkbox 文字。
+        miscRowLabel.font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        miscRowLabel.textColor = .labelColor
+        addSubview(miscRowLabel)
         slideshowAnnotationSettingsButton.isHidden = true
         capsLockSettingsButton.onClick = { [weak self] in self?.showCapsLockSettingsPage() }
         selectionToolbarSettingsButton.onClick = { [weak self] in self?.showSelectionToolbarSettingsPage() }
         activeVisionSettingsButton.onClick = { [weak self] in self?.showActiveVisionSettingsPage() }
         desktopLyricsSettingsButton.onClick = { [weak self] in self?.showDesktopLyricsSettingsPage() }
+        miscSettingsButton.onClick = { [weak self] in self?.showMiscSettingsPage() }
         backButton.onClick = { [weak self] in self?.backButtonClicked() }
 
         [loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton].forEach {
@@ -410,6 +426,11 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         configureCheckbox(activeVisionGazeCheckbox, size: 13, weight: .regular, action: #selector(activeVisionGazeCheckboxChanged), in: settingsContentView)
         configureCheckbox(activeVisionFacingCheckbox, size: 13, weight: .regular, action: #selector(activeVisionFacingCheckboxChanged), in: settingsContentView)
         configureCheckbox(activeVisionNotifyCheckbox, size: 13, weight: .regular, action: #selector(activeVisionNotifyCheckboxChanged), in: settingsContentView)
+        configureCheckbox(mouseWheelInvertCheckbox, size: 13, weight: .regular, action: #selector(mouseWheelInvertCheckboxChanged), in: settingsContentView)
+        configureCheckbox(miscSideButtonsForwardBackCheckbox, size: 13, weight: .regular, action: #selector(miscSideButtonsForwardBackCheckboxChanged), in: settingsContentView)
+        miscMouseGroupTitle.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        miscMouseGroupTitle.textColor = .secondaryLabelColor
+        settingsContentView.addSubview(miscMouseGroupTitle)
         configureCheckbox(desktopLyricsSurfaceCheckbox, size: 13, weight: .regular, action: #selector(desktopLyricsSurfaceCheckboxChanged), in: settingsContentView)
         configureCheckbox(dynamicIslandLyricsCheckbox, size: 13, weight: .regular, action: #selector(dynamicIslandLyricsCheckboxChanged), in: settingsContentView)
         configureCheckbox(dynamicIslandLyricsSpectrumCheckbox, size: 13, weight: .regular, action: #selector(dynamicIslandLyricsSpectrumCheckboxChanged), in: settingsContentView)
@@ -609,6 +630,14 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         onSlideshowAnnotationChanged?(slideshowAnnotationCheckbox.state == .on)
     }
 
+    @objc private func mouseWheelInvertCheckboxChanged() {
+        onMouseWheelInvertChanged?(mouseWheelInvertCheckbox.state == .on)
+    }
+
+    @objc private func miscSideButtonsForwardBackCheckboxChanged() {
+        onMiscMouseSideButtonsForwardBackChanged?(miscSideButtonsForwardBackCheckbox.state == .on)
+    }
+
     @objc private func loginItemCheckboxChanged() {
         onLoginItemChanged?(loginItemCheckbox.state == .on)
     }
@@ -674,6 +703,10 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
     @objc private func showDesktopLyricsSettingsPage() {
         showSettingsPage(.desktopLyricsSettings)
+    }
+
+    @objc private func showMiscSettingsPage() {
+        showSettingsPage(.miscSettings)
     }
 
     private func showDesktopLyricsSurfaceSettingsPage() {
@@ -1126,6 +1159,8 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
             layoutSearchSettingsPage()
         case .screenshotSettings:
             layoutScreenshotSettingsPage()
+        case .miscSettings:
+            layoutMiscSettingsPage()
         }
     }
 
@@ -1147,7 +1182,8 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         show(
             titleLabel, versionLabel, checkUpdateButton, toolOptionsTitle, toolOptionsCard, loginItemCheckbox, accessibilityCheckbox,
             moduleTitle, moduleCard, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, slideshowAnnotationCheckbox,
-            capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, loginItemButton, accessibilityButton,
+            miscRowLabel,
+            capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, miscSettingsButton, loginItemButton, accessibilityButton,
             clearDataAndQuitButton, quitButton
         )
 
@@ -1197,37 +1233,44 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
         let capsRowY = moduleCardFrame.maxY - Metrics.sectionInset - Metrics.rowHeight
         layoutModuleRow(
-            checkbox: capsLockCheckbox,
+            title: capsLockCheckbox,
             settingsButton: capsLockSettingsButton,
             rowY: capsRowY,
             cardFrame: moduleCardFrame
         )
 
         layoutModuleRow(
-            checkbox: selectionToolbarCheckbox,
+            title: selectionToolbarCheckbox,
             settingsButton: selectionToolbarSettingsButton,
             rowY: capsRowY - Metrics.rowHeight,
             cardFrame: moduleCardFrame
         )
 
         layoutModuleRow(
-            checkbox: activeVisionCheckbox,
+            title: activeVisionCheckbox,
             settingsButton: activeVisionSettingsButton,
             rowY: capsRowY - Metrics.rowHeight * 2,
             cardFrame: moduleCardFrame
         )
 
         layoutModuleRow(
-            checkbox: desktopLyricsCheckbox,
+            title: desktopLyricsCheckbox,
             settingsButton: desktopLyricsSettingsButton,
             rowY: capsRowY - Metrics.rowHeight * 3,
             cardFrame: moduleCardFrame
         )
 
         layoutModuleRow(
-            checkbox: slideshowAnnotationCheckbox,
+            title: slideshowAnnotationCheckbox,
             settingsButton: slideshowAnnotationSettingsButton,
             rowY: capsRowY - Metrics.rowHeight * 4,
+            cardFrame: moduleCardFrame
+        )
+
+        layoutModuleRow(
+            title: miscRowLabel,
+            settingsButton: miscSettingsButton,
+            rowY: capsRowY - Metrics.rowHeight * 5,
             cardFrame: moduleCardFrame
         )
 
@@ -1238,18 +1281,18 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         loginItemButton.frame = NSRect(x: accessibilityButton.frame.minX - gap - 122, y: footerY, width: 122, height: Metrics.footerHeight)
     }
 
-    private func layoutModuleRow(checkbox: NSButton, settingsButton: IconButtonView, rowY: CGFloat, cardFrame: NSRect) {
+    private func layoutModuleRow(title: NSControl, settingsButton: IconButtonView, rowY: CGFloat, cardFrame: NSRect) {
         let rowMidY = rowY + Metrics.rowHeight / 2
 
-        checkbox.sizeToFit()
-        checkbox.frame.origin = NSPoint(
+        title.sizeToFit()
+        title.frame.origin = NSPoint(
             x: cardFrame.minX + Metrics.sectionInset,
-            y: rowMidY - checkbox.frame.height / 2
+            y: rowMidY - title.frame.height / 2
         )
 
         let settingsHitSize: CGFloat = 30
         settingsButton.frame = NSRect(
-            x: checkbox.frame.maxX + 6,
+            x: title.frame.maxX + 6,
             y: rowMidY - settingsHitSize / 2,
             width: settingsHitSize,
             height: settingsHitSize
@@ -1791,6 +1834,31 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
         checkbox.frame.origin = NSPoint(x: contentX, y: frame.minY - gap)
     }
 
+    private func layoutMiscSettingsPage() {
+        layoutSettingsBase(title: "杂项")
+        show(miscMouseGroupTitle, mouseWheelInvertCheckbox, miscSideButtonsForwardBackCheckbox)
+
+        let contentX = Metrics.sectionInset
+        miscMouseGroupTitle.sizeToFit()
+        mouseWheelInvertCheckbox.sizeToFit()
+        miscSideButtonsForwardBackCheckbox.sizeToFit()
+        prepareSettingsContent(minimumHeight: Metrics.sectionInset * 2 + miscMouseGroupTitle.frame.height + 12 + mouseWheelInvertCheckbox.frame.height + 30 + miscSideButtonsForwardBackCheckbox.frame.height)
+
+        var topY = settingsContentHeight - Metrics.sectionInset
+
+        // 分组标题「鼠标」
+        topY -= miscMouseGroupTitle.frame.height
+        miscMouseGroupTitle.frame.origin = NSPoint(x: contentX + 2, y: topY)
+
+        // 间距 12 → 滚轮反向
+        topY -= 12 + mouseWheelInvertCheckbox.frame.height
+        mouseWheelInvertCheckbox.frame.origin = NSPoint(x: contentX, y: topY)
+
+        // 间距 30 → 侧键映射
+        topY -= 30 + miscSideButtonsForwardBackCheckbox.frame.height
+        miscSideButtonsForwardBackCheckbox.frame.origin = NSPoint(x: contentX, y: topY)
+    }
+
     private func layoutSettingsBase(title: String) {
         let width = bounds.width
         let height = bounds.height
@@ -1824,12 +1892,13 @@ final class ControlView: NSView, NSTextFieldDelegate, NSTableViewDataSource, NST
 
     private lazy var allControls: [NSView] = [
         titleLabel, versionLabel, checkUpdateButton, toolOptionsTitle, moduleTitle, settingsTitle, toolOptionsCard, moduleCard, settingsCard, settingsScrollView,
-        loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, slideshowAnnotationCheckbox, clickToDisableCheckbox,
+        loginItemCheckbox, accessibilityCheckbox, capsLockCheckbox, selectionToolbarCheckbox, activeVisionCheckbox, desktopLyricsCheckbox, slideshowAnnotationCheckbox, miscRowLabel, clickToDisableCheckbox,
         selectionToolbarSettingTitle, selectionToolbarHideInFullscreenCheckbox, selectionToolbarOrderTitle,
-        capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, slideshowAnnotationSettingsButton, backButton,
+        capsLockSettingsButton, selectionToolbarSettingsButton, activeVisionSettingsButton, desktopLyricsSettingsButton, slideshowAnnotationSettingsButton, miscSettingsButton, backButton,
         loginItemButton, accessibilityButton, clearDataAndQuitButton, quitButton, selectAllRow, copyRow, pasteRow, searchRow, screenshotRow,
         appleMusicSourceRow, qqMusicSourceRow, neteaseSourceRow, searchEnginePopup, searchTemplateField, screenshotSaveLabel, screenshotSaveButton, screenshotCopyCheckbox,
         screenshotRegionCheckbox, activeVisionGazeCheckbox, activeVisionFacingCheckbox, activeVisionNotifyCheckbox,
+        miscMouseGroupTitle, mouseWheelInvertCheckbox, miscSideButtonsForwardBackCheckbox,
         desktopLyricsHintLabel, desktopLyricsLanguageLabel, desktopLyricsLanguagePopup,
         desktopLyricsSurfaceCheckbox, desktopLyricsSurfaceSettingsButton, dynamicIslandLyricsCheckbox, dynamicIslandLyricsSettingsButton, dynamicIslandLyricsSpectrumCheckbox, dynamicIslandLyricsHideOnHoverCheckbox, menuBarLyricsCheckbox, menuBarLyricsSettingsButton,
         desktopLyricsWidthLabel, desktopLyricsWidthSlider, desktopLyricsWidthValueLabel, desktopLyricsAlignmentLabel, desktopLyricsAlignmentPopup,
